@@ -36,6 +36,7 @@ import Bitcoin.Prim.Tx
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB
+import qualified Data.List.NonEmpty as NE
 import Data.Word (Word8, Word64)
 import GHC.Generics (Generic)
 
@@ -116,25 +117,27 @@ sighash_legacy
   -> BS.ByteString    -- ^ 32-byte hash
 sighash_legacy !tx !idx !script_pubkey !sighash_type
   -- SIGHASH_SINGLE edge case: index >= number of outputs
-  | base == SIGHASH_SINGLE && idx >= length (tx_outputs tx) =
+  | base == SIGHASH_SINGLE && idx >= NE.length (tx_outputs tx) =
       sighash_single_bug
   | otherwise =
-      let !modified = modify_tx_legacy tx idx script_pubkey sighash_type
-          !serialized = serialize_legacy_for_sighash modified sighash_type
+      let !serialized = serialize_legacy_sighash tx idx script_pubkey sighash_type
       in  hash256 serialized
   where
     !base = base_type sighash_type
 
--- | Modify transaction for legacy sighash computation.
-modify_tx_legacy
+-- | Serialize transaction for legacy sighash computation.
+--   Handles all sighash flags directly without constructing intermediate Tx.
+serialize_legacy_sighash
   :: Tx
   -> Int
   -> BS.ByteString
   -> SighashType
-  -> Tx
-modify_tx_legacy Tx{..} !idx !script_pubkey !sighash_type =
+  -> BS.ByteString
+serialize_legacy_sighash Tx{..} !idx !script_pubkey !sighash_type =
   let !base = base_type sighash_type
       !anyonecanpay = is_anyonecanpay sighash_type
+      !inputs_list = NE.toList tx_inputs
+      !outputs_list = NE.toList tx_outputs
 
       -- Clear all scriptSigs, set signing input's script to scriptPubKey
       clear_scripts :: Int -> [TxIn] -> [TxIn]
@@ -154,7 +157,7 @@ modify_tx_legacy Tx{..} !idx !script_pubkey !sighash_type =
             inp { txin_sequence = 0 } : zero_other_sequences (i + 1) rest
 
       -- Process inputs based on sighash type
-      !inputs_cleared = clear_scripts 0 tx_inputs
+      !inputs_cleared = clear_scripts 0 inputs_list
 
       !inputs_processed = case base of
         SIGHASH_NONE   -> zero_other_sequences 0 inputs_cleared
@@ -171,10 +174,17 @@ modify_tx_legacy Tx{..} !idx !script_pubkey !sighash_type =
       -- Process outputs based on sighash type
       !final_outputs = case base of
         SIGHASH_NONE   -> []
-        SIGHASH_SINGLE -> build_single_outputs tx_outputs idx
-        _              -> tx_outputs
+        SIGHASH_SINGLE -> build_single_outputs outputs_list idx
+        _              -> outputs_list
 
-  in  Tx tx_version final_inputs final_outputs [] tx_locktime
+  in  to_strict $
+         put_word32_le tx_version
+      <> put_compact (fromIntegral (length final_inputs))
+      <> foldMap put_txin_legacy final_inputs
+      <> put_compact (fromIntegral (length final_outputs))
+      <> foldMap put_txout final_outputs
+      <> put_word32_le tx_locktime
+      <> put_word32_le (fromIntegral (sighash_byte sighash_type))
 
 -- | Build outputs for SIGHASH_SINGLE: keep only output at idx,
 --   replace earlier outputs with empty/zero outputs.
@@ -201,17 +211,6 @@ safe_index (x : xs) !n
   | otherwise = safe_index xs (n - 1)
 {-# INLINE safe_index #-}
 
--- | Serialize modified transaction for legacy sighash, appending sighash type.
-serialize_legacy_for_sighash :: Tx -> SighashType -> BS.ByteString
-serialize_legacy_for_sighash Tx{..} !sighash_type = to_strict $
-       put_word32_le tx_version
-    <> put_compact (fromIntegral (length tx_inputs))
-    <> foldMap put_txin_legacy tx_inputs
-    <> put_compact (fromIntegral (length tx_outputs))
-    <> foldMap put_txout tx_outputs
-    <> put_word32_le tx_locktime
-    <> put_word32_le (fromIntegral (sighash_byte sighash_type))
-
 -- | Encode TxIn for legacy sighash (same as normal encoding).
 put_txin_legacy :: TxIn -> BSB.Builder
 put_txin_legacy TxIn{..} =
@@ -229,11 +228,13 @@ put_txin_legacy TxIn{..} =
 --   sighash, this commits to the value being spent, preventing fee
 --   manipulation attacks.
 --
+--   Returns 'Nothing' if the input index is out of range.
+--
 --   @
 --   -- sign P2WPKH input 0
 --   let scriptCode = ...  -- P2WPKH scriptCode
 --   let hash = sighash_segwit tx 0 scriptCode inputValue SIGHASH_ALL
---   -- use hash with ECDSA signing
+--   -- use hash with ECDSA signing (after checking Just)
 --   @
 sighash_segwit
   :: Tx
@@ -241,20 +242,26 @@ sighash_segwit
   -> BS.ByteString    -- ^ scriptCode
   -> Word64           -- ^ value being spent (satoshis)
   -> SighashType
-  -> BS.ByteString    -- ^ 32-byte hash
-sighash_segwit !tx !idx !script_code !value !sighash_type =
-  let !preimage = build_bip143_preimage tx idx script_code value sighash_type
-  in  hash256 preimage
+  -> Maybe BS.ByteString    -- ^ 32-byte hash, or Nothing if index invalid
+sighash_segwit !tx !idx !script_code !value !sighash_type = do
+  preimage <- build_bip143_preimage tx idx script_code value sighash_type
+  pure $! hash256 preimage
 
 -- | Build BIP143 preimage for signing.
+--   Returns Nothing if the input index is out of range.
 build_bip143_preimage
   :: Tx
   -> Int
   -> BS.ByteString
   -> Word64
   -> SighashType
-  -> BS.ByteString
-build_bip143_preimage Tx{..} !idx !script_code !value !sighash_type =
+  -> Maybe BS.ByteString
+build_bip143_preimage Tx{..} !idx !script_code !value !sighash_type = do
+  -- Get the input being signed; fail if index out of range
+  let !inputs_list = NE.toList tx_inputs
+      !outputs_list = NE.toList tx_outputs
+  signing_input <- safe_index inputs_list idx
+
   let !base = base_type sighash_type
       !anyonecanpay = is_anyonecanpay sighash_type
 
@@ -277,28 +284,23 @@ build_bip143_preimage Tx{..} !idx !script_code !value !sighash_type =
       !hash_outputs = case base of
         SIGHASH_NONE -> zero32
         SIGHASH_SINGLE ->
-          case safe_index tx_outputs idx of
+          case safe_index outputs_list idx of
             Nothing  -> zero32  -- index out of range
             Just out -> hash256 $ to_strict $ put_txout out
         _ -> hash256 $ to_strict $ foldMap put_txout tx_outputs
 
-      -- Get the input being signed
-      !signing_input = case safe_index tx_inputs idx of
-        Just inp -> inp
-        Nothing  -> error "sighash_segwit: invalid input index"
-
       !outpoint = txin_prevout signing_input
       !sequence_n = txin_sequence signing_input
 
-  in  to_strict $
-         put_word32_le tx_version
-      <> BSB.byteString hash_prevouts
-      <> BSB.byteString hash_sequence
-      <> put_outpoint outpoint
-      <> put_compact (fromIntegral (BS.length script_code))
-      <> BSB.byteString script_code
-      <> put_word64_le value
-      <> put_word32_le sequence_n
-      <> BSB.byteString hash_outputs
-      <> put_word32_le tx_locktime
-      <> put_word32_le (fromIntegral (sighash_byte sighash_type))
+  pure $! to_strict $
+       put_word32_le tx_version
+    <> BSB.byteString hash_prevouts
+    <> BSB.byteString hash_sequence
+    <> put_outpoint outpoint
+    <> put_compact (fromIntegral (BS.length script_code))
+    <> BSB.byteString script_code
+    <> put_word64_le value
+    <> put_word32_le sequence_n
+    <> BSB.byteString hash_outputs
+    <> put_word32_le tx_locktime
+    <> put_word32_le (fromIntegral (sighash_byte sighash_type))

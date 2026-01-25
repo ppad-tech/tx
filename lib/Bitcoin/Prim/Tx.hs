@@ -21,6 +21,7 @@ module Bitcoin.Prim.Tx (
   , OutPoint(..)
   , Witness(..)
   , TxId(..)
+  , mkTxId
 
     -- * Serialisation
   , to_bytes
@@ -47,12 +48,27 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
 import qualified Data.ByteString.Builder as BSB
 import qualified Data.ByteString.Lazy as BL
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NE
 import Data.Word (Word32, Word64)
 import GHC.Generics (Generic)
 
 -- | Transaction ID (32 bytes, little-endian double-SHA256).
 newtype TxId = TxId BS.ByteString
   deriving (Eq, Show, Generic)
+
+-- | Construct a TxId from a 32-byte ByteString.
+--
+--   Returns 'Nothing' if the input is not exactly 32 bytes.
+--
+--   @
+--   mkTxId (BS.replicate 32 0x00) == Just (TxId ...)
+--   mkTxId (BS.replicate 31 0x00) == Nothing
+--   @
+mkTxId :: BS.ByteString -> Maybe TxId
+mkTxId bs
+  | BS.length bs == 32 = Just (TxId bs)
+  | otherwise          = Nothing
 
 -- | Transaction outpoint (txid + output index).
 data OutPoint = OutPoint
@@ -78,10 +94,13 @@ newtype Witness = Witness [BS.ByteString]
   deriving (Eq, Show, Generic)
 
 -- | Complete transaction.
+--
+--   Bitcoin requires at least one input and one output, enforced here
+--   via 'NonEmpty' lists.
 data Tx = Tx
   { tx_version   :: {-# UNPACK #-} !Word32
-  , tx_inputs    :: ![TxIn]
-  , tx_outputs   :: ![TxOut]
+  , tx_inputs    :: !(NonEmpty TxIn)
+  , tx_outputs   :: !(NonEmpty TxOut)
   , tx_witnesses :: ![Witness]  -- ^ empty list for legacy tx
   , tx_locktime  :: {-# UNPACK #-} !Word32
   } deriving (Eq, Show, Generic)
@@ -103,9 +122,9 @@ to_bytes tx@Tx {..}
            put_word32_le tx_version
         <> BSB.word8 0x00  -- marker
         <> BSB.word8 0x01  -- flag
-        <> put_compact (fromIntegral (length tx_inputs))
+        <> put_compact (fromIntegral (NE.length tx_inputs))
         <> foldMap put_txin tx_inputs
-        <> put_compact (fromIntegral (length tx_outputs))
+        <> put_compact (fromIntegral (NE.length tx_outputs))
         <> foldMap put_txout tx_outputs
         <> foldMap put_witness tx_witnesses
         <> put_word32_le tx_locktime
@@ -124,9 +143,9 @@ to_bytes tx@Tx {..}
 to_bytes_legacy :: Tx -> BS.ByteString
 to_bytes_legacy Tx {..} = to_strict $
        put_word32_le tx_version
-    <> put_compact (fromIntegral (length tx_inputs))
+    <> put_compact (fromIntegral (NE.length tx_inputs))
     <> foldMap put_txin tx_inputs
-    <> put_compact (fromIntegral (length tx_outputs))
+    <> put_compact (fromIntegral (NE.length tx_outputs))
     <> foldMap put_txout tx_outputs
     <> put_word32_le tx_locktime
 
@@ -248,12 +267,14 @@ parse_legacy :: BS.ByteString -> Word32 -> Int -> Maybe Tx
 parse_legacy !bs !version !off0 = do
   -- input count
   (input_count, off1) <- get_compact bs off0
-  -- inputs
-  (inputs, off2) <- get_many get_txin bs off1 (fromIntegral input_count)
+  -- inputs (must have at least one)
+  (inputs_list, off2) <- get_many get_txin bs off1 (fromIntegral input_count)
+  inputs <- NE.nonEmpty inputs_list
   -- output count
   (output_count, off3) <- get_compact bs off2
-  -- outputs
-  (outputs, off4) <- get_many get_txout bs off3 (fromIntegral output_count)
+  -- outputs (must have at least one)
+  (outputs_list, off4) <- get_many get_txout bs off3 (fromIntegral output_count)
+  outputs <- NE.nonEmpty outputs_list
   -- locktime (4 bytes)
   guard (BS.length bs >= off4 + 4)
   let !locktime = get_word32_le bs off4
@@ -267,12 +288,14 @@ parse_segwit :: BS.ByteString -> Word32 -> Int -> Maybe Tx
 parse_segwit !bs !version !off0 = do
   -- input count
   (input_count, off1) <- get_compact bs off0
-  -- inputs
-  (inputs, off2) <- get_many get_txin bs off1 (fromIntegral input_count)
+  -- inputs (must have at least one)
+  (inputs_list, off2) <- get_many get_txin bs off1 (fromIntegral input_count)
+  inputs <- NE.nonEmpty inputs_list
   -- output count
   (output_count, off3) <- get_compact bs off2
-  -- outputs
-  (outputs, off4) <- get_many get_txout bs off3 (fromIntegral output_count)
+  -- outputs (must have at least one)
+  (outputs_list, off4) <- get_many get_txout bs off3 (fromIntegral output_count)
+  outputs <- NE.nonEmpty outputs_list
   -- witnesses (one per input)
   (witnesses, off5) <- get_many get_witness bs off4 (fromIntegral input_count)
   -- locktime (4 bytes)
