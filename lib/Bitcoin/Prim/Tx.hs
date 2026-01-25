@@ -33,6 +33,7 @@ module Bitcoin.Prim.Tx (
   , txid
   ) where
 
+import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Bits ((.|.), shiftL)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
@@ -413,4 +414,4 @@ get_many getter !bs = go []
 
 -- | Compute the transaction ID (double SHA256 of legacy serialisation).
 txid :: Tx -> TxId
-txid = error "Bitcoin.Prim.Tx.txid: not yet implemented"
+txid tx = TxId (SHA256.hash (SHA256.hash (to_bytes_legacy tx)))
