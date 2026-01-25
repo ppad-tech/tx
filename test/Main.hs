@@ -3,11 +3,17 @@
 module Main where
 
 import Bitcoin.Prim.Tx
+import Bitcoin.Prim.Tx.Sighash
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
 import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NE
+import Data.Word (Word64)
 import Test.Tasty
 import qualified Test.Tasty.HUnit as H
+import Test.Tasty.QuickCheck as QC hiding (Witness)
+import Test.QuickCheck
+  ( Gen, Arbitrary(..), elements, oneof, chooseInt, forAll, (==>) )
 
 -- main ------------------------------------------------------------------------
 
@@ -38,6 +44,27 @@ main = defaultMain $
           testGroup "legacy" [
             ]
         , testGroup "BIP143 segwit" [
+              bip143_native_p2wpkh
+            , bip143_p2sh_p2wpkh
+            ]
+        ]
+    , testGroup "properties" [
+          testGroup "round-trip" [
+              prop_roundtrip_bytes
+            , prop_roundtrip_base16
+            ]
+        , testGroup "serialisation" [
+              prop_legacy_no_witnesses
+            , prop_segwit_longer
+            ]
+        , testGroup "txid" [
+              prop_txid_32_bytes
+            , prop_txid_ignores_witnesses
+            ]
+        , testGroup "sighash" [
+              prop_sighash_legacy_32_bytes
+            , prop_sighash_segwit_32_bytes
+            , prop_sighash_single_bug
             ]
         ]
     ]
@@ -335,3 +362,199 @@ edge_multi_witness = H.testCase "multiple witness items" $
       [ hex "3044"
       , hex "03"
       ]
+
+-- BIP143 sighash vectors -----------------------------------------------------
+
+-- Native P2WPKH (BIP143 example)
+-- https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki
+bip143_native_p2wpkh :: TestTree
+bip143_native_p2wpkh = H.testCase "native P2WPKH" $ do
+  let rawTx = hex $ mconcat
+        [ "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf43354"
+        , "1db4e4ad969f0000000000eeffffffef51e1b804cc89d182d279655c3aa89e"
+        , "815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff02202cb20600"
+        , "0000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac9093"
+        , "510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988"
+        , "ac11000000"
+        ]
+  case from_bytes rawTx of
+    Nothing -> H.assertFailure "failed to parse BIP143 tx"
+    Just tx -> do
+      let inputIdx = 1
+          -- scriptCode for P2WPKH (without length prefix)
+          scriptCode = hex
+            "76a9141d0f172a0ecb48aee1be1f2687d2963ae33f71a188ac"
+          value = 600000000 :: Word64
+          expected = hex
+            "c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670"
+      case sighash_segwit tx inputIdx scriptCode value SIGHASH_ALL of
+        Nothing -> H.assertFailure "sighash_segwit returned Nothing"
+        Just result -> H.assertEqual "sighash mismatch" expected result
+
+-- P2SH-P2WPKH (BIP143 example)
+bip143_p2sh_p2wpkh :: TestTree
+bip143_p2sh_p2wpkh = H.testCase "P2SH-P2WPKH" $ do
+  let rawTx = hex $ mconcat
+        [ "0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac"
+        , "4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b6"
+        , "84d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914"
+        , "fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000"
+        ]
+  case from_bytes rawTx of
+    Nothing -> H.assertFailure "failed to parse BIP143 tx"
+    Just tx -> do
+      let inputIdx = 0
+          -- scriptCode without length prefix
+          scriptCode = hex
+            "76a91479091972186c449eb1ded22b78e40d009bdf008988ac"
+          value = 1000000000 :: Word64
+          expected = hex
+            "64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6"
+      case sighash_segwit tx inputIdx scriptCode value SIGHASH_ALL of
+        Nothing -> H.assertFailure "sighash_segwit returned Nothing"
+        Just result -> H.assertEqual "sighash mismatch" expected result
+
+-- Arbitrary instances --------------------------------------------------------
+
+instance Arbitrary TxId where
+  arbitrary = TxId . BS.pack <$> vectorOf 32 arbitrary
+
+instance Arbitrary OutPoint where
+  arbitrary = OutPoint <$> arbitrary <*> arbitrary
+
+instance Arbitrary TxIn where
+  arbitrary = TxIn
+    <$> arbitrary
+    <*> arbitraryScript
+    <*> arbitrary
+
+instance Arbitrary TxOut where
+  arbitrary = TxOut
+    <$> arbitrary
+    <*> arbitraryScript
+
+instance Arbitrary Witness where
+  arbitrary = Witness <$> listOf arbitraryScript
+
+instance Arbitrary SighashType where
+  arbitrary = elements
+    [ SIGHASH_ALL
+    , SIGHASH_NONE
+    , SIGHASH_SINGLE
+    , SIGHASH_ALL_ANYONECANPAY
+    , SIGHASH_NONE_ANYONECANPAY
+    , SIGHASH_SINGLE_ANYONECANPAY
+    ]
+
+-- | Generate arbitrary script-like bytestrings (0-200 bytes).
+arbitraryScript :: Gen BS.ByteString
+arbitraryScript = do
+  len <- chooseInt (0, 200)
+  BS.pack <$> vectorOf len arbitrary
+
+-- | Generate a NonEmpty list of 1-5 items.
+arbitraryNonEmpty :: Arbitrary a => Gen (NonEmpty a)
+arbitraryNonEmpty = do
+  x <- arbitrary
+  xs <- listOf1to4
+  pure (x :| xs)
+  where
+    listOf1to4 = do
+      n <- chooseInt (0, 4)
+      vectorOf n arbitrary
+
+-- | Generate a valid legacy transaction (no witnesses).
+genLegacyTx :: Gen Tx
+genLegacyTx = do
+  ver <- arbitrary
+  ins <- arbitraryNonEmpty
+  outs <- arbitraryNonEmpty
+  lt <- arbitrary
+  pure $ Tx ver ins outs [] lt
+
+-- | Generate a valid segwit transaction (with witnesses).
+genSegwitTx :: Gen Tx
+genSegwitTx = do
+  ver <- arbitrary
+  ins <- arbitraryNonEmpty
+  outs <- arbitraryNonEmpty
+  -- One witness per input
+  let numInputs = NE.length ins
+  wits <- vectorOf numInputs arbitrary
+  lt <- arbitrary
+  pure $ Tx ver ins outs wits lt
+
+-- | Generate any valid transaction.
+instance Arbitrary Tx where
+  arbitrary = oneof [genLegacyTx, genSegwitTx]
+
+-- property tests -------------------------------------------------------------
+
+-- Round-trip: from_bytes (to_bytes tx) == Just tx
+prop_roundtrip_bytes :: TestTree
+prop_roundtrip_bytes = QC.testProperty "from_bytes . to_bytes == Just" $
+  \tx -> from_bytes (to_bytes tx) === Just (tx :: Tx)
+
+-- Round-trip: from_base16 (to_base16 tx) == Just tx
+prop_roundtrip_base16 :: TestTree
+prop_roundtrip_base16 = QC.testProperty "from_base16 . to_base16 == Just" $
+  \tx -> from_base16 (to_base16 tx) === Just (tx :: Tx)
+
+-- Legacy tx (no witnesses): to_bytes == to_bytes_legacy
+prop_legacy_no_witnesses :: TestTree
+prop_legacy_no_witnesses =
+  QC.testProperty "legacy tx: to_bytes == to_bytes_legacy" $
+    forAll genLegacyTx $ \tx ->
+      to_bytes tx === to_bytes_legacy tx
+
+-- Segwit tx: to_bytes is longer than to_bytes_legacy (when witnesses present)
+prop_segwit_longer :: TestTree
+prop_segwit_longer =
+  QC.testProperty "segwit tx: to_bytes longer than to_bytes_legacy" $
+    forAll genSegwitTx $ \tx ->
+      not (null (tx_witnesses tx)) ==>
+        BS.length (to_bytes tx) > BS.length (to_bytes_legacy tx)
+
+-- TxId is always 32 bytes
+prop_txid_32_bytes :: TestTree
+prop_txid_32_bytes = QC.testProperty "txid is always 32 bytes" $
+  \tx -> let TxId bs = txid tx in BS.length bs === 32
+
+-- TxId ignores witnesses (same txid with or without witnesses)
+prop_txid_ignores_witnesses :: TestTree
+prop_txid_ignores_witnesses =
+  QC.testProperty "txid ignores witnesses" $
+    forAll genSegwitTx $ \tx ->
+      let txNoWit = tx { tx_witnesses = [] }
+      in  txid tx === txid txNoWit
+
+-- sighash_legacy always returns 32 bytes
+prop_sighash_legacy_32_bytes :: TestTree
+prop_sighash_legacy_32_bytes =
+  QC.testProperty "sighash_legacy is always 32 bytes" $
+    forAll genLegacyTx $ \tx ->
+      forAll arbitraryScript $ \spk ->
+        forAll arbitrary $ \st ->
+          BS.length (sighash_legacy tx 0 spk st) === 32
+
+-- sighash_segwit returns Just 32 bytes for valid index
+prop_sighash_segwit_32_bytes :: TestTree
+prop_sighash_segwit_32_bytes =
+  QC.testProperty "sighash_segwit is 32 bytes for valid index" $
+    forAll genSegwitTx $ \tx ->
+      forAll arbitraryScript $ \sc ->
+        forAll (arbitrary :: Gen Word64) $ \val ->
+          forAll arbitrary $ \st ->
+            case sighash_segwit tx 0 sc val st of
+              Nothing -> False  -- should succeed for index 0
+              Just bs -> BS.length bs == 32
+
+-- SIGHASH_SINGLE bug: returns 0x01 ++ 0x00*31 when index >= outputs
+prop_sighash_single_bug :: TestTree
+prop_sighash_single_bug =
+  QC.testProperty "SIGHASH_SINGLE bug when index >= outputs" $
+    forAll genLegacyTx $ \tx ->
+      let numOutputs = NE.length (tx_outputs tx)
+          bugValue = BS.cons 0x01 (BS.replicate 31 0x00)
+      in  forAll arbitraryScript $ \spk ->
+            sighash_legacy tx numOutputs spk SIGHASH_SINGLE === bugValue

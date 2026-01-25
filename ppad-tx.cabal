@@ -54,6 +54,7 @@ test-suite tx-tests
     , bytestring
     , ppad-base16
     , ppad-tx
+    , QuickCheck
     , tasty
     , tasty-hunit
     , tasty-quickcheck
