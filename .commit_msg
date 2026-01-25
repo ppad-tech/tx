@@ -1,0 +1,16 @@
+Implement transaction encoding (Phase 1)
+
+Add binary serialisation for Bitcoin transactions using
+Data.ByteString.Builder:
+
+- Internal helpers: put_compact (compactSize/varint encoding),
+  put_word32_le, put_word64_le, to_strict
+- Component encoders: put_outpoint, put_txin, put_txout, put_witness
+- Main functions: to_bytes (segwit-aware), to_bytes_legacy
+
+to_bytes emits segwit format (marker 0x00, flag 0x01, witnesses after
+outputs) when witnesses are present, otherwise delegates to legacy.
+to_bytes_legacy always emits legacy format (no marker/flag/witnesses),
+used for txid computation.
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
