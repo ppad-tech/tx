@@ -5,6 +5,7 @@ module Main where
 import Bitcoin.Prim.Tx
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
+import Data.List.NonEmpty (NonEmpty(..))
 import Test.Tasty
 import qualified Test.Tasty.HUnit as H
 
@@ -73,8 +74,8 @@ roundtrip_legacy_simple = H.testCase "simple legacy tx" $
   where
     legacyTx = Tx
       { tx_version   = 1
-      , tx_inputs    = [txin]
-      , tx_outputs   = [txout]
+      , tx_inputs    = txin :| []
+      , tx_outputs   = txout :| []
       , tx_witnesses = []
       , tx_locktime  = 0
       }
@@ -98,8 +99,8 @@ roundtrip_segwit = H.testCase "segwit tx with witnesses" $
   where
     segwitTx = Tx
       { tx_version   = 2
-      , tx_inputs    = [txin]
-      , tx_outputs   = [txout]
+      , tx_inputs    = txin :| []
+      , tx_outputs   = txout :| []
       , tx_witnesses = [witness]
       , tx_locktime  = 500000
       }
@@ -127,8 +128,8 @@ roundtrip_multi_io = H.testCase "multiple inputs/outputs" $
   where
     multiTx = Tx
       { tx_version   = 1
-      , tx_inputs    = [txin1, txin2, txin3]
-      , tx_outputs   = [txout1, txout2]
+      , tx_inputs    = txin1 :| [txin2, txin3]
+      , tx_outputs   = txout1 :| [txout2]
       , tx_witnesses = []
       , tx_locktime  = 123456
       }
@@ -220,8 +221,8 @@ edge_empty_scriptsig = H.testCase "empty scriptSig" $
   where
     tx = Tx
       { tx_version   = 2
-      , tx_inputs    = [txin]
-      , tx_outputs   = [txout]
+      , tx_inputs    = txin :| []
+      , tx_outputs   = txout :| []
       , tx_witnesses = [witness]
       , tx_locktime  = 0
       }
@@ -246,8 +247,8 @@ edge_max_sequence = H.testCase "maximum sequence (0xffffffff)" $
   where
     tx = Tx
       { tx_version   = 1
-      , tx_inputs    = [txin]
-      , tx_outputs   = [txout]
+      , tx_inputs    = txin :| []
+      , tx_outputs   = txout :| []
       , tx_witnesses = []
       , tx_locktime  = 0
       }
@@ -271,8 +272,8 @@ edge_zero_locktime = H.testCase "zero locktime" $
   where
     tx = Tx
       { tx_version   = 1
-      , tx_inputs    = [txin]
-      , tx_outputs   = [txout]
+      , tx_inputs    = txin :| []
+      , tx_outputs   = txout :| []
       , tx_witnesses = []
       , tx_locktime  = 0
       }
@@ -296,8 +297,8 @@ edge_multi_witness = H.testCase "multiple witness items" $
   where
     tx = Tx
       { tx_version   = 2
-      , tx_inputs    = [txin1, txin2]
-      , tx_outputs   = [txout]
+      , tx_inputs    = txin1 :| [txin2]
+      , tx_outputs   = txout :| []
       , tx_witnesses = [witness1, witness2]
       , tx_locktime  = 0
       }

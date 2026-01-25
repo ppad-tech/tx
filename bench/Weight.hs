@@ -5,6 +5,7 @@ module Main where
 
 import Control.DeepSeq
 import qualified Data.ByteString as BS
+import Data.List.NonEmpty (NonEmpty(..))
 import qualified Weigh as W
 
 import Bitcoin.Prim.Tx
@@ -57,21 +58,23 @@ sampleWitness = Witness
   ]
 
 -- | Create a legacy transaction with n inputs and m outputs.
+--   Requires n >= 1 and m >= 1.
 mkLegacyTx :: Int -> Int -> Tx
 mkLegacyTx !numInputs !numOutputs = Tx
   { tx_version   = 1
-  , tx_inputs    = replicate numInputs sampleInput
-  , tx_outputs   = replicate numOutputs sampleOutput
+  , tx_inputs    = sampleInput :| replicate (numInputs - 1) sampleInput
+  , tx_outputs   = sampleOutput :| replicate (numOutputs - 1) sampleOutput
   , tx_witnesses = []
   , tx_locktime  = 0
   }
 
 -- | Create a segwit transaction with n inputs and m outputs.
+--   Requires n >= 1 and m >= 1.
 mkSegwitTx :: Int -> Int -> Tx
 mkSegwitTx !numInputs !numOutputs = Tx
   { tx_version   = 2
-  , tx_inputs    = replicate numInputs sampleSegwitInput
-  , tx_outputs   = replicate numOutputs sampleOutput
+  , tx_inputs    = sampleSegwitInput :| replicate (numInputs - 1) sampleSegwitInput
+  , tx_outputs   = sampleOutput :| replicate (numOutputs - 1) sampleOutput
   , tx_witnesses = replicate numInputs sampleWitness
   , tx_locktime  = 0
   }
