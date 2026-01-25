@@ -31,6 +31,14 @@ module Bitcoin.Prim.Tx (
 
     -- * TxId
   , txid
+
+    -- * Internal (for Sighash)
+  , put_word32_le
+  , put_word64_le
+  , put_compact
+  , put_outpoint
+  , put_txout
+  , to_strict
   ) where
 
 import qualified Crypto.Hash.SHA256 as SHA256
