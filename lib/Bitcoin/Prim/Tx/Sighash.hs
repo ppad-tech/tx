@@ -93,17 +93,21 @@ hash256 :: BS.ByteString -> BS.ByteString
 hash256 = SHA256.hash . SHA256.hash
 {-# INLINE hash256 #-}
 
--- legacy sighash ---------------------------------------------------------------
+-- legacy sighash -------------------------------------------------------------
 
--- | Compute legacy sighash.
+-- | Compute legacy sighash for P2PKH/P2SH inputs.
 --
 --   Modifies a copy of the transaction based on sighash flags, appends
 --   the sighash type as 4-byte little-endian, and double SHA256s.
 --
---   >>> let tx = ...  -- some transaction
---   >>> let spk = ... -- scriptPubKey being spent
---   >>> sighash_legacy tx 0 spk SIGHASH_ALL
---   <32-byte hash>
+--   @
+--   -- sign input 0 with SIGHASH_ALL
+--   let hash = sighash_legacy tx 0 scriptPubKey SIGHASH_ALL
+--   -- use hash with ECDSA signing
+--   @
+--
+--   For SIGHASH_SINGLE with input index >= output count, returns the
+--   special \"sighash single bug\" value (0x01 followed by 31 zero bytes).
 sighash_legacy
   :: Tx
   -> Int              -- ^ input index
@@ -146,7 +150,8 @@ modify_tx_legacy Tx{..} !idx !script_pubkey !sighash_type =
       zero_other_sequences !_ [] = []
       zero_other_sequences !i (inp : rest)
         | i == idx  = inp : zero_other_sequences (i + 1) rest
-        | otherwise = inp { txin_sequence = 0 } : zero_other_sequences (i + 1) rest
+        | otherwise =
+            inp { txin_sequence = 0 } : zero_other_sequences (i + 1) rest
 
       -- Process inputs based on sighash type
       !inputs_cleared = clear_scripts 0 tx_inputs
@@ -216,17 +221,20 @@ put_txin_legacy TxIn{..} =
     <> put_word32_le txin_sequence
 {-# INLINE put_txin_legacy #-}
 
--- BIP143 segwit sighash --------------------------------------------------------
+-- BIP143 segwit sighash -------------------------------------------------------
 
 -- | Compute BIP143 segwit sighash.
 --
---   Required for signing segwit inputs (P2WPKH, P2WSH).
+--   Required for signing segwit inputs (P2WPKH, P2WSH). Unlike legacy
+--   sighash, this commits to the value being spent, preventing fee
+--   manipulation attacks.
 --
---   >>> let tx = ...    -- some transaction
---   >>> let sc = ...    -- scriptCode
---   >>> let val = 50000 -- value in satoshis
---   >>> sighash_segwit tx 0 sc val SIGHASH_ALL
---   <32-byte hash>
+--   @
+--   -- sign P2WPKH input 0
+--   let scriptCode = ...  -- P2WPKH scriptCode
+--   let hash = sighash_segwit tx 0 scriptCode inputValue SIGHASH_ALL
+--   -- use hash with ECDSA signing
+--   @
 sighash_segwit
   :: Tx
   -> Int              -- ^ input index

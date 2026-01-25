@@ -91,6 +91,11 @@ data Tx = Tx
 -- | Serialise a transaction to bytes.
 --
 --   Uses segwit format if witnesses are present, legacy otherwise.
+--
+--   @
+--   -- round-trip
+--   from_bytes (to_bytes tx) == Just tx
+--   @
 to_bytes :: Tx -> BS.ByteString
 to_bytes tx@Tx {..}
     | null tx_witnesses = to_bytes_legacy tx
@@ -107,7 +112,15 @@ to_bytes tx@Tx {..}
 
 -- | Serialise a transaction to legacy format (no witness data).
 --
---   Used for txid computation.
+--   Used for txid computation. Excludes witness data even if present.
+--
+--   @
+--   -- for legacy tx (no witnesses), same as to_bytes
+--   to_bytes_legacy legacyTx == to_bytes legacyTx
+--
+--   -- for segwit tx, strips witnesses
+--   BS.length (to_bytes_legacy segwitTx) < BS.length (to_bytes segwitTx)
+--   @
 to_bytes_legacy :: Tx -> BS.ByteString
 to_bytes_legacy Tx {..} = to_strict $
        put_word32_le tx_version
@@ -117,11 +130,20 @@ to_bytes_legacy Tx {..} = to_strict $
     <> foldMap put_txout tx_outputs
     <> put_word32_le tx_locktime
 
--- | Serialise a transaction to base16.
+-- | Serialise a transaction to base16 (hex).
+--
+--   @
+--   to_base16 tx = B16.encode (to_bytes tx)
+--   @
 to_base16 :: Tx -> BS.ByteString
 to_base16 tx = B16.encode (to_bytes tx)
 
--- | Parse a transaction from base16.
+-- | Parse a transaction from base16 (hex).
+--
+--   @
+--   -- round-trip
+--   from_base16 (to_base16 tx) == Just tx
+--   @
 from_base16 :: BS.ByteString -> Maybe Tx
 from_base16 b16 = do
   bs <- B16.decode b16
@@ -201,6 +223,13 @@ put_witness (Witness items) =
 --
 --   Automatically detects segwit vs legacy format by checking for
 --   marker byte 0x00 followed by flag 0x01 after the version field.
+--
+--   Returns 'Nothing' on invalid or truncated input.
+--
+--   @
+--   -- round-trip
+--   from_bytes (to_bytes tx) == Just tx
+--   @
 from_bytes :: BS.ByteString -> Maybe Tx
 from_bytes !bs = do
   -- need at least 4 bytes for version
@@ -421,5 +450,14 @@ get_many getter !bs = go []
 -- txid ------------------------------------------------------------------------
 
 -- | Compute the transaction ID (double SHA256 of legacy serialisation).
+--
+--   The txid is computed from the legacy serialisation, so segwit
+--   transactions have the same txid regardless of witness data.
+--
+--   @
+--   -- Satoshi->Hal tx (block 170)
+--   txid satoshiHalTx ==
+--     TxId "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
+--   @
 txid :: Tx -> TxId
 txid tx = TxId (SHA256.hash (SHA256.hash (to_bytes_legacy tx)))
