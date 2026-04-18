@@ -13,12 +13,6 @@ import Bitcoin.Prim.Tx.Sighash
 
 -- NFData instances ------------------------------------------------------------
 
-instance NFData TxId
-instance NFData OutPoint
-instance NFData TxIn
-instance NFData TxOut
-instance NFData Witness
-instance NFData Tx
 instance NFData SighashType
 
 -- sample data -----------------------------------------------------------------

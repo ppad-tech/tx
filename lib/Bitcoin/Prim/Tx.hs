@@ -42,6 +42,7 @@ module Bitcoin.Prim.Tx (
   , to_strict
   ) where
 
+import Control.DeepSeq (NFData(..))
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Bits ((.|.), shiftL)
 import qualified Data.ByteString as BS
@@ -56,6 +57,8 @@ import GHC.Generics (Generic)
 -- | Transaction ID (32 bytes, little-endian double-SHA256).
 newtype TxId = TxId BS.ByteString
   deriving (Eq, Show, Generic)
+
+instance NFData TxId
 
 -- | Construct a TxId from a 32-byte ByteString.
 --
@@ -76,6 +79,8 @@ data OutPoint = OutPoint
   , op_vout  :: {-# UNPACK #-} !Word32
   } deriving (Eq, Show, Generic)
 
+instance NFData OutPoint
+
 -- | Transaction input.
 data TxIn = TxIn
   { txin_prevout    :: {-# UNPACK #-} !OutPoint
@@ -83,15 +88,21 @@ data TxIn = TxIn
   , txin_sequence   :: {-# UNPACK #-} !Word32
   } deriving (Eq, Show, Generic)
 
+instance NFData TxIn
+
 -- | Transaction output.
 data TxOut = TxOut
   { txout_value         :: {-# UNPACK #-} !Word64  -- ^ satoshis
   , txout_script_pubkey :: !BS.ByteString
   } deriving (Eq, Show, Generic)
 
+instance NFData TxOut
+
 -- | Witness stack for a single input.
 newtype Witness = Witness [BS.ByteString]
   deriving (Eq, Show, Generic)
+
+instance NFData Witness
 
 -- | Complete transaction.
 --
@@ -104,6 +115,8 @@ data Tx = Tx
   , tx_witnesses :: ![Witness]  -- ^ empty list for legacy tx
   , tx_locktime  :: {-# UNPACK #-} !Word32
   } deriving (Eq, Show, Generic)
+
+instance NFData Tx
 
 -- serialisation ---------------------------------------------------------------
 
