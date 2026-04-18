@@ -40,8 +40,20 @@ main = defaultMain $
         , edge_zero_locktime
         , edge_multi_witness
         ]
+    , testGroup "validation" [
+          test_mkTxId_valid
+        , test_mkTxId_short
+        , test_mkTxId_long
+        , test_mkTxId_empty
+        , test_from_bytes_truncated
+        , test_from_bytes_trailing
+        , test_from_bytes_garbage
+        , test_from_base16_invalid_hex
+        , test_sighash_segwit_oob
+        ]
     , testGroup "sighash" [
           testGroup "legacy" [
+              sighash_legacy_minimal
             ]
         , testGroup "BIP143 segwit" [
               bip143_native_p2wpkh
@@ -362,6 +374,141 @@ edge_multi_witness = H.testCase "multiple witness items" $
       [ hex "3044"
       , hex "03"
       ]
+
+-- validation tests -----------------------------------------------------------
+
+-- mkTxId: valid 32-byte input accepted
+test_mkTxId_valid :: TestTree
+test_mkTxId_valid = H.testCase "mkTxId accepts 32 bytes" $
+  case mkTxId (BS.replicate 32 0x00) of
+    Nothing -> H.assertFailure "mkTxId returned Nothing"
+    Just _  -> pure ()
+
+-- mkTxId: 31 bytes rejected
+test_mkTxId_short :: TestTree
+test_mkTxId_short = H.testCase "mkTxId rejects 31 bytes" $
+  H.assertEqual "should be Nothing"
+    Nothing (mkTxId (BS.replicate 31 0x00))
+
+-- mkTxId: 33 bytes rejected
+test_mkTxId_long :: TestTree
+test_mkTxId_long = H.testCase "mkTxId rejects 33 bytes" $
+  H.assertEqual "should be Nothing"
+    Nothing (mkTxId (BS.replicate 33 0x00))
+
+-- mkTxId: empty input rejected
+test_mkTxId_empty :: TestTree
+test_mkTxId_empty = H.testCase "mkTxId rejects empty" $
+  H.assertEqual "should be Nothing"
+    Nothing (mkTxId BS.empty)
+
+-- from_bytes: truncated input rejected
+test_from_bytes_truncated :: TestTree
+test_from_bytes_truncated =
+  H.testCase "from_bytes rejects truncated input" $ do
+    let full = to_bytes legacyTx1
+        truncated = BS.take (BS.length full - 1) full
+    H.assertEqual "should be Nothing"
+      Nothing (from_bytes truncated)
+
+-- from_bytes: trailing bytes rejected
+test_from_bytes_trailing :: TestTree
+test_from_bytes_trailing =
+  H.testCase "from_bytes rejects trailing bytes" $ do
+    let full = to_bytes legacyTx1
+        padded = full <> BS.singleton 0x00
+    H.assertEqual "should be Nothing"
+      Nothing (from_bytes padded)
+
+-- from_bytes: garbage rejected
+test_from_bytes_garbage :: TestTree
+test_from_bytes_garbage =
+  H.testCase "from_bytes rejects garbage" $
+    H.assertEqual "should be Nothing"
+      Nothing (from_bytes (BS.pack [0xde, 0xad]))
+
+-- from_base16: invalid hex rejected
+test_from_base16_invalid_hex :: TestTree
+test_from_base16_invalid_hex =
+  H.testCase "from_base16 rejects invalid hex" $
+    H.assertEqual "should be Nothing"
+      Nothing (from_base16 "not valid hex!!!")
+
+-- sighash_segwit: out-of-range index returns Nothing
+test_sighash_segwit_oob :: TestTree
+test_sighash_segwit_oob =
+  H.testCase "sighash_segwit rejects out-of-range index" $ do
+    let rawTx = hex $ mconcat
+          [ "0100000002fff7f7881a8099afa6940d42d1e7f6362bec"
+          , "38171ea3edf433541db4e4ad969f0000000000eeffffff"
+          , "ef51e1b804cc89d182d279655c3aa89e815b1b309fe287"
+          , "d9b2b55d57b90ec68a0100000000ffffffff02202cb206"
+          , "000000001976a9148280b37df378db99f66f85c95a783a"
+          , "76ac7a6d5988ac9093510d000000001976a9143bde42db"
+          , "ee7e4dbe6a21b2d50ce2f0167faa815988ac11000000"
+          ]
+    case from_bytes rawTx of
+      Nothing -> H.assertFailure "failed to parse tx"
+      Just tx ->
+        H.assertEqual "should be Nothing"
+          Nothing
+          (sighash_segwit tx 99 "script" 0 SIGHASH_ALL)
+
+-- | A minimal legacy tx used by validation tests.
+legacyTx1 :: Tx
+legacyTx1 = Tx
+  { tx_version   = 1
+  , tx_inputs    = txin :| []
+  , tx_outputs   = txout :| []
+  , tx_witnesses = []
+  , tx_locktime  = 0
+  }
+  where
+    txin = TxIn
+      { txin_prevout = OutPoint
+          { op_txid = TxId (BS.replicate 32 0x00)
+          , op_vout = 0
+          }
+      , txin_script_sig = hex "00"
+      , txin_sequence   = 0xffffffff
+      }
+    txout = TxOut
+      { txout_value = 0
+      , txout_script_pubkey = hex "6a"
+      }
+
+-- legacy sighash vectors ----------------------------------------------------
+
+-- Minimal tx: 1-in/1-out, signing input 0, SIGHASH_ALL,
+-- scriptPubKey = OP_1 (0x51)
+sighash_legacy_minimal :: TestTree
+sighash_legacy_minimal =
+  H.testCase "minimal tx SIGHASH_ALL" $ do
+    let tx = Tx
+          { tx_version   = 1
+          , tx_inputs    = txin :| []
+          , tx_outputs   = txout :| []
+          , tx_witnesses = []
+          , tx_locktime  = 0
+          }
+        txin = TxIn
+          { txin_prevout = OutPoint
+              { op_txid = TxId (BS.replicate 32 0x00)
+              , op_vout = 0
+              }
+          , txin_script_sig = hex "00"
+          , txin_sequence   = 0xffffffff
+          }
+        txout = TxOut
+          { txout_value = 0
+          , txout_script_pubkey = hex "6a"
+          }
+        script_pubkey = hex "51"
+        expected = hex
+          "049b7618cbda49a0190c5eea6f97320b\
+          \930aa32b64be6e71ed20041067685c45"
+        result = sighash_legacy tx 0 script_pubkey SIGHASH_ALL
+    H.assertEqual "sighash mismatch" expected result
 
 -- BIP143 sighash vectors -----------------------------------------------------
 
