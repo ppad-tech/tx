@@ -61,11 +61,18 @@ main = defaultMain $
     , testGroup "sighash" [
           testGroup "legacy" [
               sighash_legacy_minimal
+            , testGroup "codeseparators" [
+                  codesep_no_op
+                , codesep_strip_simple
+                , codesep_inside_push
+                , codesep_inside_pushdata1
+                ]
             , testGroup "Bitcoin Core sighash.json" [
                   bc_sighash_1
                 , bc_sighash_2
                 , bc_sighash_4
                 , bc_sighash_9
+                , bc_sighash_14
                 , bc_sighash_20
                 ]
             ]
@@ -103,6 +110,8 @@ main = defaultMain $
             , prop_sighash_legacy_acp_invariant
             , prop_sighash_legacy_none_invariant
             , prop_sighash_legacy_none_acp_invariant
+            , prop_strip_codesep_idempotent
+            , prop_strip_codesep_no_0xab_unchanged
             ]
         ]
     ]
@@ -1019,6 +1028,15 @@ bc_sighash_9 = bcSighashCase
   (-1960128125)
   "29aa6d2d752d3310eba20442770ad345b7f6a35f96161ede5f07b33e92053e2a"
 
+bc_sighash_14 :: TestTree
+bc_sighash_14 = bcSighashCase
+  "entry 14: idx=1, hashType=0x9604e295 (ALL|ACP, strips 2x 0xab)"
+  "f40a750702af06efff3ea68e5d56e42bc41cdb8b6065c98f1221fe04a325a898cb61f3d7ee030000000363acacffffffffb5788174aef79788716f96af779d7959147a0c2e0e5bfb6c2dba2df5b4b97894030000000965510065535163ac6affffffff0445e6fd0200000000096aac536365526a526aa6546b000000000008acab656a6552535141a0fd010000000000c897ea030000000008526500ab526a6a631b39dba3"
+  "00abab5163ac"
+  1
+  (-1778064747)
+  "d76d0fc0abfa72d646df888bce08db957e627f72962647016eeae5a8412354cf"
+
 bc_sighash_20 :: TestTree
 bc_sighash_20 = bcSighashCase
   "entry 20: idx=0, hashType=0xcab2f825 (ALL)"
@@ -1032,4 +1050,51 @@ bc_sighash_20 = bcSighashCase
   0
   (-894181723)
   "8b300032a1915a4ac05cea2f7d44c26f2a08d109a71602636f15866563eaafdc"
+
+-- strip_codeseparators tests -------------------------------------------------
+
+-- A script containing 0x00, OP_1, OP_IF, OP_CHECKSIG and no 0xab. Strip
+-- should be a no-op.
+codesep_no_op :: TestTree
+codesep_no_op = H.testCase "no 0xab: unchanged" $
+  H.assertEqual "" (BS.pack [0x00, 0x51, 0x63, 0xac])
+    (strip_codeseparators (BS.pack [0x00, 0x51, 0x63, 0xac]))
+
+-- Two OP_CODESEPARATOR bytes in opcode position get stripped.
+codesep_strip_simple :: TestTree
+codesep_strip_simple = H.testCase "0xab at opcode position stripped" $
+  H.assertEqual "" (BS.pack [0x00, 0x51, 0x63, 0xac])
+    (strip_codeseparators (BS.pack [0x00, 0xab, 0xab, 0x51, 0x63, 0xac]))
+
+-- A direct push (opcode 0x02) of two 0xab bytes: data preserved.
+codesep_inside_push :: TestTree
+codesep_inside_push = H.testCase "0xab inside push data preserved" $
+  let s = BS.pack [0x02, 0xab, 0xab, 0x51]  -- push 2 bytes, then OP_1
+  in  H.assertEqual "" s (strip_codeseparators s)
+
+-- OP_PUSHDATA1 with 3 bytes of 0xab, followed by a lone 0xab opcode and
+-- OP_1. The data must be preserved; the trailing 0xab opcode stripped.
+codesep_inside_pushdata1 :: TestTree
+codesep_inside_pushdata1 =
+  H.testCase "OP_PUSHDATA1 data preserved, trailing 0xab stripped" $
+    let input    = BS.pack [0x4c, 0x03, 0xab, 0xab, 0xab, 0xab, 0x51]
+        expected = BS.pack [0x4c, 0x03, 0xab, 0xab, 0xab, 0x51]
+    in  H.assertEqual "" expected (strip_codeseparators input)
+
+-- | Arbitrary ByteString generator (QuickCheck has no built-in instance).
+genByteString :: Gen BS.ByteString
+genByteString = BS.pack <$> arbitrary
+
+prop_strip_codesep_idempotent :: TestTree
+prop_strip_codesep_idempotent =
+  QC.testProperty "strip_codeseparators is idempotent" $
+    forAll genByteString $ \s ->
+      strip_codeseparators (strip_codeseparators s)
+        === strip_codeseparators s
+
+prop_strip_codesep_no_0xab_unchanged :: TestTree
+prop_strip_codesep_no_0xab_unchanged =
+  QC.testProperty "strip_codeseparators is no-op without 0xab bytes" $
+    forAll (BS.pack . filter (/= 0xab) <$> arbitrary) $ \s ->
+      strip_codeseparators s === s
 

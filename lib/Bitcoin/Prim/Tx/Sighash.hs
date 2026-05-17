@@ -21,6 +21,9 @@ module Bitcoin.Prim.Tx.Sighash (
 
     -- * BIP143 Segwit Sighash
   , sighash_segwit
+
+    -- * Internal
+  , strip_codeseparators
   ) where
 
 import Bitcoin.Prim.Tx
@@ -39,7 +42,7 @@ import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB
 import qualified Data.List.NonEmpty as NE
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
 import GHC.Generics (Generic)
 
 -- | Canonical sighash type flags.
@@ -108,6 +111,52 @@ hash256 :: BS.ByteString -> BS.ByteString
 hash256 = SHA256.hash . SHA256.hash
 {-# INLINE hash256 #-}
 
+-- | Strip @OP_CODESEPARATOR@ (0xab) opcodes from a script, skipping
+--   push-data sections so that data bytes equal to 0xab are preserved.
+--
+--   This is consensus-required preprocessing for the legacy sighash
+--   scriptCode (see Bitcoin Core's @CTransactionSignatureSerializer@).
+--   BIP143 segwit sighash does /not/ perform this stripping; for
+--   segwit, the caller is responsible for trimming the scriptCode to
+--   the portion after the last executed @OP_CODESEPARATOR@.
+--
+--   On a malformed script (truncated push data), the malformed tail is
+--   copied verbatim without further codeseparator processing.
+strip_codeseparators :: BS.ByteString -> BS.ByteString
+strip_codeseparators = BS.pack . go . BS.unpack
+  where
+    go :: [Word8] -> [Word8]
+    go [] = []
+    go (b : rest)
+      | b == 0xab              = go rest
+      | b >= 0x01 && b <= 0x4b = push (fromIntegral b) [b] rest
+      | b == 0x4c              = case rest of
+          (n : rest') -> push (fromIntegral n) [b, n] rest'
+          []          -> [b]
+      | b == 0x4d              = case rest of
+          (n0 : n1 : rest') ->
+            let !len = fromIntegral n0
+                     + fromIntegral n1 * 0x100
+            in  push len [b, n0, n1] rest'
+          _ -> b : rest
+      | b == 0x4e              = case rest of
+          (n0 : n1 : n2 : n3 : rest') ->
+            let !len = fromIntegral n0
+                     + fromIntegral n1 * 0x100
+                     + fromIntegral n2 * 0x10000
+                     + fromIntegral n3 * 0x1000000
+            in  push len [b, n0, n1, n2, n3] rest'
+          _ -> b : rest
+      | otherwise              = b : go rest
+
+    -- | Copy a push header and N data bytes verbatim. If the script is
+    --   truncated, copy whatever's available and stop processing.
+    push :: Int -> [Word8] -> [Word8] -> [Word8]
+    push !len !header !rest =
+      let (chunk, rest') = splitAt len rest
+      in  header ++ chunk ++
+            if length chunk == len then go rest' else []
+
 -- legacy sighash -------------------------------------------------------------
 
 -- | Compute legacy sighash for P2PKH/P2SH inputs.
@@ -152,7 +201,8 @@ serialize_legacy_sighash
   -> Word32
   -> BS.ByteString
 serialize_legacy_sighash Tx{..} !idx !script_pubkey !ht =
-  let !base = base_type ht
+  let !script' = strip_codeseparators script_pubkey
+      !base = base_type ht
       !anyonecanpay = is_anyonecanpay ht
       !inputs_list = NE.toList tx_inputs
       !outputs_list = NE.toList tx_outputs
@@ -161,7 +211,7 @@ serialize_legacy_sighash Tx{..} !idx !script_pubkey !ht =
       clear_scripts :: Int -> [TxIn] -> [TxIn]
       clear_scripts !_ [] = []
       clear_scripts !i (inp : rest)
-        | i == idx  = inp { txin_script_sig = script_pubkey } : clear_rest
+        | i == idx  = inp { txin_script_sig = script' } : clear_rest
         | otherwise = inp { txin_script_sig = BS.empty } : clear_rest
         where
           !clear_rest = clear_scripts (i + 1) rest
