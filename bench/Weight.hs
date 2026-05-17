@@ -6,6 +6,7 @@ module Main where
 import Control.DeepSeq
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Word (Word64)
 import qualified Weigh as W
 
 import Bitcoin.Prim.Tx
@@ -97,6 +98,17 @@ smallSegwitBytes  = to_bytes smallSegwitTx
 mediumSegwitBytes = to_bytes mediumSegwitTx
 largeSegwitBytes  = to_bytes largeSegwitTx
 
+-- sighash inputs --------------------------------------------------------------
+
+sampleScriptPubKey :: BS.ByteString
+sampleScriptPubKey = BS.replicate 25 0x00
+
+sampleScriptCode :: BS.ByteString
+sampleScriptCode = BS.replicate 26 0x00
+
+sampleValue :: Word64
+sampleValue = 100000000
+
 -- allocation benchmarks -------------------------------------------------------
 
 main :: IO ()
@@ -132,3 +144,36 @@ main = W.mainWith $ do
     W.func "txid/medium-segwit" txid mediumSegwitTx
     W.func "txid/large-legacy"  txid largeLegacyTx
     W.func "txid/large-segwit"  txid largeSegwitTx
+
+    -- sighash_legacy
+    W.func "sighash_legacy/small  / SIGHASH_ALL"
+      (sighashLegacy smallLegacyTx  SIGHASH_ALL)    0
+    W.func "sighash_legacy/medium / SIGHASH_ALL"
+      (sighashLegacy mediumLegacyTx SIGHASH_ALL)    0
+    W.func "sighash_legacy/large  / SIGHASH_ALL"
+      (sighashLegacy largeLegacyTx  SIGHASH_ALL)    0
+    W.func "sighash_legacy/medium / SIGHASH_NONE"
+      (sighashLegacy mediumLegacyTx SIGHASH_NONE)   0
+    W.func "sighash_legacy/medium / SIGHASH_SINGLE"
+      (sighashLegacy mediumLegacyTx SIGHASH_SINGLE) 0
+    W.func "sighash_legacy/medium / SIGHASH_ALL|ACP"
+      (sighashLegacy mediumLegacyTx SIGHASH_ALL_ANYONECANPAY) 0
+
+    -- sighash_segwit
+    W.func "sighash_segwit/small  / SIGHASH_ALL"
+      (sighashSegwit smallSegwitTx  SIGHASH_ALL)    0
+    W.func "sighash_segwit/medium / SIGHASH_ALL"
+      (sighashSegwit mediumSegwitTx SIGHASH_ALL)    0
+    W.func "sighash_segwit/large  / SIGHASH_ALL"
+      (sighashSegwit largeSegwitTx  SIGHASH_ALL)    0
+    W.func "sighash_segwit/medium / SIGHASH_NONE"
+      (sighashSegwit mediumSegwitTx SIGHASH_NONE)   0
+    W.func "sighash_segwit/medium / SIGHASH_SINGLE"
+      (sighashSegwit mediumSegwitTx SIGHASH_SINGLE) 0
+    W.func "sighash_segwit/medium / SIGHASH_ALL|ACP"
+      (sighashSegwit mediumSegwitTx SIGHASH_ALL_ANYONECANPAY) 0
+  where
+    sighashLegacy tx st i =
+      sighash_legacy tx i sampleScriptPubKey (encode_sighash st)
+    sighashSegwit tx st i =
+      sighash_segwit tx i sampleScriptCode sampleValue (encode_sighash st)

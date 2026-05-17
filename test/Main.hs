@@ -6,9 +6,10 @@ import Bitcoin.Prim.Tx
 import Bitcoin.Prim.Tx.Sighash
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
+import Data.Int (Int32)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import Test.Tasty
 import qualified Test.Tasty.HUnit as H
 import Test.Tasty.QuickCheck as QC hiding (Witness)
@@ -30,9 +31,15 @@ main = defaultMain $
               parse_satoshi_hal
             , parse_first_segwit
             ]
+        , testGroup "compactSize" [
+              test_compact_non_minimal_fd
+            , test_compact_non_minimal_fe
+            , test_compact_non_minimal_ff
+            ]
         ]
     , testGroup "txid" [
           txid_satoshi_hal
+        , txid_first_segwit
         ]
     , testGroup "edge cases" [
           edge_empty_scriptsig
@@ -54,10 +61,25 @@ main = defaultMain $
     , testGroup "sighash" [
           testGroup "legacy" [
               sighash_legacy_minimal
+            , testGroup "Bitcoin Core sighash.json" [
+                  bc_sighash_1
+                , bc_sighash_2
+                , bc_sighash_4
+                , bc_sighash_9
+                , bc_sighash_20
+                ]
             ]
         , testGroup "BIP143 segwit" [
               bip143_native_p2wpkh
             , bip143_p2sh_p2wpkh
+            , testGroup "P2SH-P2WSH multi-sighash" [
+                  bip143_p2sh_p2wsh_all
+                , bip143_p2sh_p2wsh_none
+                , bip143_p2sh_p2wsh_single
+                , bip143_p2sh_p2wsh_all_acp
+                , bip143_p2sh_p2wsh_none_acp
+                , bip143_p2sh_p2wsh_single_acp
+                ]
             ]
         ]
     , testGroup "properties" [
@@ -77,6 +99,10 @@ main = defaultMain $
               prop_sighash_legacy_32_bytes
             , prop_sighash_segwit_32_bytes
             , prop_sighash_single_bug
+            , prop_sighash_segwit_oob
+            , prop_sighash_legacy_acp_invariant
+            , prop_sighash_legacy_none_invariant
+            , prop_sighash_legacy_none_acp_invariant
             ]
         ]
     ]
@@ -452,7 +478,7 @@ test_sighash_segwit_oob =
       Just tx ->
         H.assertEqual "should be Nothing"
           Nothing
-          (sighash_segwit tx 99 "script" 0 SIGHASH_ALL)
+          (sighash_segwit tx 99 "script" 0 (encode_sighash SIGHASH_ALL))
 
 -- | A minimal legacy tx used by validation tests.
 legacyTx1 :: Tx
@@ -507,7 +533,8 @@ sighash_legacy_minimal =
         expected = hex
           "049b7618cbda49a0190c5eea6f97320b\
           \930aa32b64be6e71ed20041067685c45"
-        result = sighash_legacy tx 0 script_pubkey SIGHASH_ALL
+        result = sighash_legacy tx 0 script_pubkey
+                   (encode_sighash SIGHASH_ALL)
     H.assertEqual "sighash mismatch" expected result
 
 -- BIP143 sighash vectors -----------------------------------------------------
@@ -534,7 +561,8 @@ bip143_native_p2wpkh = H.testCase "native P2WPKH" $ do
           value = 600000000 :: Word64
           expected = hex
             "c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670"
-      case sighash_segwit tx inputIdx scriptCode value SIGHASH_ALL of
+      case sighash_segwit tx inputIdx scriptCode value
+             (encode_sighash SIGHASH_ALL) of
         Nothing -> H.assertFailure "sighash_segwit returned Nothing"
         Just result -> H.assertEqual "sighash mismatch" expected result
 
@@ -557,7 +585,8 @@ bip143_p2sh_p2wpkh = H.testCase "P2SH-P2WPKH" $ do
           value = 1000000000 :: Word64
           expected = hex
             "64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6"
-      case sighash_segwit tx inputIdx scriptCode value SIGHASH_ALL of
+      case sighash_segwit tx inputIdx scriptCode value
+             (encode_sighash SIGHASH_ALL) of
         Nothing -> H.assertFailure "sighash_segwit returned Nothing"
         Just result -> H.assertEqual "sighash mismatch" expected result
 
@@ -682,19 +711,21 @@ prop_sighash_legacy_32_bytes =
     forAll genLegacyTx $ \tx ->
       forAll arbitraryScript $ \spk ->
         forAll arbitrary $ \st ->
-          BS.length (sighash_legacy tx 0 spk st) === 32
+          BS.length (sighash_legacy tx 0 spk (encode_sighash st)) === 32
 
--- sighash_segwit returns Just 32 bytes for valid index
+-- sighash_segwit returns Just 32 bytes for any valid index
 prop_sighash_segwit_32_bytes :: TestTree
 prop_sighash_segwit_32_bytes =
   QC.testProperty "sighash_segwit is 32 bytes for valid index" $
     forAll genSegwitTx $ \tx ->
-      forAll arbitraryScript $ \sc ->
-        forAll (arbitrary :: Gen Word64) $ \val ->
-          forAll arbitrary $ \st ->
-            case sighash_segwit tx 0 sc val st of
-              Nothing -> False  -- should succeed for index 0
-              Just bs -> BS.length bs == 32
+      let nIns = NE.length (tx_inputs tx)
+      in  forAll (chooseInt (0, nIns - 1)) $ \idx ->
+            forAll arbitraryScript $ \sc ->
+              forAll (arbitrary :: Gen Word64) $ \val ->
+                forAll arbitrary $ \st ->
+                  case sighash_segwit tx idx sc val (encode_sighash st) of
+                    Nothing -> False  -- should succeed for valid index
+                    Just bs -> BS.length bs == 32
 
 -- SIGHASH_SINGLE bug: returns 0x01 ++ 0x00*31 when index >= outputs
 prop_sighash_single_bug :: TestTree
@@ -704,4 +735,301 @@ prop_sighash_single_bug =
       let numOutputs = NE.length (tx_outputs tx)
           bugValue = BS.cons 0x01 (BS.replicate 31 0x00)
       in  forAll arbitraryScript $ \spk ->
-            sighash_legacy tx numOutputs spk SIGHASH_SINGLE === bugValue
+            sighash_legacy tx numOutputs spk
+              (encode_sighash SIGHASH_SINGLE) === bugValue
+
+-- sighash_segwit: out-of-range index always returns Nothing
+prop_sighash_segwit_oob :: TestTree
+prop_sighash_segwit_oob =
+  QC.testProperty "sighash_segwit returns Nothing for oob index" $
+    forAll genSegwitTx $ \tx ->
+      let nIns = NE.length (tx_inputs tx)
+      in  forAll (chooseInt (nIns, nIns + 10)) $ \idx ->
+            forAll arbitraryScript $ \sc ->
+              forAll (arbitrary :: Gen Word64) $ \val ->
+                forAll arbitrary $ \st ->
+                  sighash_segwit tx idx sc val (encode_sighash st)
+                    === Nothing
+
+-- ANYONECANPAY commits to only the signing input. Appending extra
+-- inputs to the tx (without displacing index 0) must not change the
+-- hash.
+prop_sighash_legacy_acp_invariant :: TestTree
+prop_sighash_legacy_acp_invariant =
+  QC.testProperty "SIGHASH_ALL|ANYONECANPAY ignores appended inputs" $
+    forAll genLegacyTx $ \tx ->
+      forAll (QC.listOf1 (arbitrary :: Gen TxIn)) $ \extras ->
+        forAll arbitraryScript $ \spk ->
+          let tx' = tx { tx_inputs = appendInputs (tx_inputs tx) extras }
+              ht  = encode_sighash SIGHASH_ALL_ANYONECANPAY
+              h1  = sighash_legacy tx  0 spk ht
+              h2  = sighash_legacy tx' 0 spk ht
+          in  h1 === h2
+
+-- SIGHASH_NONE strips outputs from the preimage. Appending extra
+-- outputs must not change the hash.
+prop_sighash_legacy_none_invariant :: TestTree
+prop_sighash_legacy_none_invariant =
+  QC.testProperty "SIGHASH_NONE ignores appended outputs" $
+    forAll genLegacyTx $ \tx ->
+      forAll (QC.listOf1 (arbitrary :: Gen TxOut)) $ \extras ->
+        forAll arbitraryScript $ \spk ->
+          let tx' = tx { tx_outputs = appendOutputs (tx_outputs tx) extras }
+              ht  = encode_sighash SIGHASH_NONE
+              h1  = sighash_legacy tx  0 spk ht
+              h2  = sighash_legacy tx' 0 spk ht
+          in  h1 === h2
+
+-- SIGHASH_NONE|ANYONECANPAY ignores both other inputs and all outputs.
+prop_sighash_legacy_none_acp_invariant :: TestTree
+prop_sighash_legacy_none_acp_invariant =
+  QC.testProperty
+    "SIGHASH_NONE|ANYONECANPAY ignores appended inputs and outputs" $
+    forAll genLegacyTx $ \tx ->
+      forAll (QC.listOf1 (arbitrary :: Gen TxIn)) $ \extraIns ->
+        forAll (QC.listOf1 (arbitrary :: Gen TxOut)) $ \extraOuts ->
+          forAll arbitraryScript $ \spk ->
+            let tx' = tx
+                  { tx_inputs  = appendInputs  (tx_inputs tx)  extraIns
+                  , tx_outputs = appendOutputs (tx_outputs tx) extraOuts
+                  }
+                ht = encode_sighash SIGHASH_NONE_ANYONECANPAY
+                h1 = sighash_legacy tx  0 spk ht
+                h2 = sighash_legacy tx' 0 spk ht
+            in  h1 === h2
+
+-- | Append items to a NonEmpty list.
+appendInputs :: NonEmpty TxIn -> [TxIn] -> NonEmpty TxIn
+appendInputs (x :| xs) extras = x :| (xs ++ extras)
+
+appendOutputs :: NonEmpty TxOut -> [TxOut] -> NonEmpty TxOut
+appendOutputs (x :| xs) extras = x :| (xs ++ extras)
+
+-- compactSize non-minimal rejection -----------------------------------------
+
+-- Build a legacy tx whose input scriptSig length is encoded with a
+-- non-minimal compactSize tag. We construct the bytes directly.
+--
+-- Layout (legacy):
+--   version(4) | n_inputs(compact) | outpoint(36) | scriptSig_len(compact)
+--   | scriptSig | sequence(4) | n_outputs(compact) | outputs... | locktime(4)
+--
+-- We use a 0-byte scriptSig but encode its length with a non-minimal tag.
+nonMinimalLegacyTx :: BS.ByteString -> BS.ByteString
+nonMinimalLegacyTx badLen = BS.concat
+  [ BS.pack [0x01, 0x00, 0x00, 0x00]      -- version 1
+  , BS.pack [0x01]                        -- 1 input
+  , BS.replicate 32 0x00                  -- outpoint txid
+  , BS.pack [0x00, 0x00, 0x00, 0x00]      -- outpoint vout
+  , badLen                                -- non-minimal compactSize
+  , BS.pack [0xff, 0xff, 0xff, 0xff]      -- sequence
+  , BS.pack [0x01]                        -- 1 output
+  , BS.replicate 8 0x00                   -- value
+  , BS.pack [0x00]                        -- empty scriptPubKey
+  , BS.pack [0x00, 0x00, 0x00, 0x00]      -- locktime
+  ]
+
+test_compact_non_minimal_fd :: TestTree
+test_compact_non_minimal_fd =
+  H.testCase "rejects 0xfd encoding of value < 0xfd" $
+    H.assertEqual "should be Nothing"
+      Nothing
+      (from_bytes (nonMinimalLegacyTx (BS.pack [0xfd, 0x00, 0x00])))
+
+test_compact_non_minimal_fe :: TestTree
+test_compact_non_minimal_fe =
+  H.testCase "rejects 0xfe encoding of value <= 0xffff" $
+    H.assertEqual "should be Nothing"
+      Nothing
+      (from_bytes
+         (nonMinimalLegacyTx (BS.pack [0xfe, 0x00, 0x00, 0x00, 0x00])))
+
+test_compact_non_minimal_ff :: TestTree
+test_compact_non_minimal_ff =
+  H.testCase "rejects 0xff encoding of value <= 0xffffffff" $
+    H.assertEqual "should be Nothing"
+      Nothing
+      (from_bytes (nonMinimalLegacyTx
+         (BS.pack [0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])))
+
+-- segwit txid known vector --------------------------------------------------
+
+-- Regression vector: txid of firstSegwitRaw, displayed big-endian.
+firstSegwitTxId :: BS.ByteString
+firstSegwitTxId =
+  "c586389e5e4b3acb9d6c8be1c19ae8ab2795397633176f5a6442a261bbdefc3a"
+
+txid_first_segwit :: TestTree
+txid_first_segwit = H.testCase "txid of first-segwit fixture" $
+  case from_base16 firstSegwitRaw of
+    Nothing -> H.assertFailure "failed to parse tx"
+    Just tx -> do
+      let TxId computed = txid tx
+          expected      = BS.reverse (hex firstSegwitTxId)
+      H.assertEqual "txid mismatch" expected computed
+
+-- BIP143 P2SH-P2WSH multi-sighash vectors -----------------------------------
+
+-- Shared fixture: unsigned tx, scriptCode, input index, value.
+-- Source: https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki
+p2shP2wshTx :: Tx
+p2shP2wshTx =
+  let raw = mconcat
+        [ "010000000136641869ca081e70f394c6948e8af409e18b619df2ed74aa106c"
+        , "1ca29787b96e0100000000ffffffff0200e9a435000000001976a914389ffc"
+        , "e9cd9ae88dcc0631e88a821ffdbe9bfe2688acc0832f05000000001976a914"
+        , "7480a33f950689af511e6e84c138dbbd3c3ee41588ac00000000"
+        ]
+  in  case from_base16 raw of
+        Just t  -> t
+        Nothing -> error "BIP143 P2SH-P2WSH fixture failed to parse"
+
+p2shP2wshScriptCode :: BS.ByteString
+p2shP2wshScriptCode = hex $ mconcat
+  [ "56210307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c"
+  , "3ba32103b28f0c28bfab54554ae8c658ac5c3e0ce6e79ad336331f78c428dd43ee"
+  , "a8449b21034b8113d703413d57761b8b9781957b8c0ac1dfe69f492580ca4195f5"
+  , "0376ba4a21033400f6afecb833092a9a21cfdf1ed1376e58c5d1f47de746831239"
+  , "87e967a8f42103a6d48b1131e94ba04d9737d61acdaa1322008af9602b3b14862c"
+  , "07a1789aac162102d8b661b0b3302ee2f162b09e07a55ad5dfbe673a9f01d9f0c1"
+  , "9617681024306b56ae"
+  ]
+
+p2shP2wshValue :: Word64
+p2shP2wshValue = 987654321  -- 9.87654321 BTC
+
+assertP2shP2wshSighash :: SighashType -> BS.ByteString -> H.Assertion
+assertP2shP2wshSighash st expectedHex =
+  case sighash_segwit p2shP2wshTx 0 p2shP2wshScriptCode p2shP2wshValue
+         (encode_sighash st) of
+    Nothing  -> H.assertFailure "sighash_segwit returned Nothing"
+    Just res -> H.assertEqual "sighash mismatch" (hex expectedHex) res
+
+bip143_p2sh_p2wsh_all :: TestTree
+bip143_p2sh_p2wsh_all = H.testCase "SIGHASH_ALL" $
+  assertP2shP2wshSighash SIGHASH_ALL
+    "185c0be5263dce5b4bb50a047973c1b6272bfbd0103a89444597dc40b248ee7c"
+
+bip143_p2sh_p2wsh_none :: TestTree
+bip143_p2sh_p2wsh_none = H.testCase "SIGHASH_NONE" $
+  assertP2shP2wshSighash SIGHASH_NONE
+    "e9733bc60ea13c95c6527066bb975a2ff29a925e80aa14c213f686cbae5d2f36"
+
+bip143_p2sh_p2wsh_single :: TestTree
+bip143_p2sh_p2wsh_single = H.testCase "SIGHASH_SINGLE" $
+  assertP2shP2wshSighash SIGHASH_SINGLE
+    "1e1f1c303dc025bd664acb72e583e933fae4cff9148bf78c157d1e8f78530aea"
+
+bip143_p2sh_p2wsh_all_acp :: TestTree
+bip143_p2sh_p2wsh_all_acp = H.testCase "SIGHASH_ALL|ANYONECANPAY" $
+  assertP2shP2wshSighash SIGHASH_ALL_ANYONECANPAY
+    "2a67f03e63a6a422125878b40b82da593be8d4efaafe88ee528af6e5a9955c6e"
+
+bip143_p2sh_p2wsh_none_acp :: TestTree
+bip143_p2sh_p2wsh_none_acp = H.testCase "SIGHASH_NONE|ANYONECANPAY" $
+  assertP2shP2wshSighash SIGHASH_NONE_ANYONECANPAY
+    "781ba15f3779d5542ce8ecb5c18716733a5ee42a6f51488ec96154934e2c890a"
+
+bip143_p2sh_p2wsh_single_acp :: TestTree
+bip143_p2sh_p2wsh_single_acp = H.testCase "SIGHASH_SINGLE|ANYONECANPAY" $
+  assertP2shP2wshSighash SIGHASH_SINGLE_ANYONECANPAY
+    "511e8e52ed574121fc1b654970395502128263f62662e076dc6baf05c2e6a99b"
+
+-- Bitcoin Core sighash.json legacy vectors ----------------------------------
+
+-- These exercise the raw 32-bit hashType code path. Bitcoin Core's
+-- sighash.json uses non-canonical hashType values that commit the full
+-- 32 bits to the preimage; the SighashType ADT can't construct them.
+--
+-- Source: github.com/bitcoin/bitcoin src/test/data/sighash.json (first
+-- 20 entries). Expected hashes are stored big-endian (via
+-- uint256::GetHex) so we reverse before comparing.
+--
+-- Bitcoin Core's hashType field is int32_t (signed); we cast to Word32.
+bcHashType :: Int32 -> Word32
+bcHashType = fromIntegral
+
+-- | Run a Bitcoin-Core sighash.json legacy vector.
+bcSighashCase
+  :: TestName
+  -> BS.ByteString  -- ^ raw tx hex
+  -> BS.ByteString  -- ^ scriptCode hex
+  -> Int            -- ^ input index
+  -> Int32          -- ^ signed hashType
+  -> BS.ByteString  -- ^ expected hash hex (big-endian display)
+  -> TestTree
+bcSighashCase name rawHex scriptHex idx ht expectedHex =
+  H.testCase name $
+    case from_base16 rawHex of
+      Nothing -> H.assertFailure "failed to parse tx"
+      Just tx ->
+        let result   = sighash_legacy tx idx (hex scriptHex) (bcHashType ht)
+            expected = BS.reverse (hex expectedHex)
+        in  H.assertEqual "sighash mismatch" expected result
+
+bc_sighash_1 :: TestTree
+bc_sighash_1 = bcSighashCase
+  "entry 1: idx=2, hashType=0x6f29291f (ALL)"
+  (mconcat
+    [ "907c2bc503ade11cc3b04eb2918b6f547b0630ab569273824748c87ea14b0696"
+    , "526c66ba740200000004ab65ababfd1f9bdd4ef073c7afc4ae00da8a66f429c9"
+    , "17a0081ad1e1dabce28d373eab81d8628de802000000096aab5253ab52000052"
+    , "ad042b5f25efb33beec9f3364e8a9139e8439d9d7e26529c3c30b6c3fd89f868"
+    , "4cfd68ea0200000009ab53526500636a52ab599ac2fe02a526ed040000000008"
+    , "535300516352515164370e010000000003006300ab2ec229"
+    ])
+  ""
+  2
+  1864164639
+  "31af167a6cf3f9d5f6875caa4d31704ceb0eba078d132b78dab52c3b8997317e"
+
+-- NOTE: raw hex is on a single line to avoid manual-splitting errors.
+bc_sighash_2 :: TestTree
+bc_sighash_2 = bcSighashCase
+  "entry 2: idx=0, hashType=0xad118f9c (ALL|ACP)"
+  "a0aa3126041621a6dea5b800141aa696daf28408959dfb2df96095db9fa425ad3f427f2f6103000000015360290e9c6063fa26912c2e7fb6a0ad80f1c5fea1771d42f12976092e7a85a4229fdb6e890000000001abc109f6e47688ac0e4682988785744602b8c87228fcef0695085edf19088af1a9db126e93000000000665516aac536affffffff8fe53e0806e12dfd05d67ac68f4768fdbe23fc48ace22a5aa8ba04c96d58e2750300000009ac51abac63ab5153650524aa680455ce7b000000000000499e50030000000008636a00ac526563ac5051ee030000000003abacabd2b6fe000000000003516563910fb6b5"
+  "65"
+  0
+  (-1391424484)
+  "48d6a1bd2cd9eec54eb866fc71209418a950402b5d7e52363bfb75c98e141175"
+
+bc_sighash_4 :: TestTree
+bc_sighash_4 = bcSighashCase
+  "entry 4: idx=1, hashType=0x46fb4ce9 (ALL|ACP)"
+  (mconcat
+    [ "73107cbd025c22ebc8c3e0a47b2a760739216a528de8d4dab5d45cbeb3051ceb"
+    , "ae73b01ca10200000007ab6353656a636affffffffe26816dffc670841e6a6c8"
+    , "c61c586da401df1261a330a6c6b3dd9f9a0789bc9e000000000800ac6552ac6a"
+    , "ac51ffffffff0174a8f0010000000004ac52515100000000"
+    ])
+  "5163ac63635151ac"
+  1
+  1190874345
+  "06e328de263a87b09beabe222a21627a6ea5c7f560030da31610c4611f4a46bc"
+
+bc_sighash_9 :: TestTree
+bc_sighash_9 = bcSighashCase
+  "entry 9: idx=0, hashType=0x8b07e3c3 (SINGLE|ACP)"
+  (mconcat
+    [ "d3b7421e011f4de0f1cea9ba7458bf3486bee722519efab711a963fa8c100970"
+    , "cf7488b7bb0200000003525352dcd61b300148be5d05000000000000000000"
+    ])
+  "535251536aac536a"
+  0
+  (-1960128125)
+  "29aa6d2d752d3310eba20442770ad345b7f6a35f96161ede5f07b33e92053e2a"
+
+bc_sighash_20 :: TestTree
+bc_sighash_20 = bcSighashCase
+  "entry 20: idx=0, hashType=0xcab2f825 (ALL)"
+  (mconcat
+    [ "c2b0b99001acfecf7da736de0ffaef8134a9676811602a6299ba5a2563a23bb0"
+    , "9e8cbedf9300000000026300ffffffff042997c50300000000045252536a2724"
+    , "37030000000007655353ab6363ac663752030000000002ab6a6d5c9000000000"
+    , "00066a6a5265abab00000000"
+    ])
+  "52ac525163515251"
+  0
+  (-894181723)
+  "8b300032a1915a4ac05cea2f7d44c26f2a08d109a71602636f15866563eaafdc"
+
