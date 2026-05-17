@@ -9,7 +9,7 @@ import qualified Data.ByteString.Base16 as B16
 import Data.Int (Int32)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
 import Test.Tasty
 import qualified Test.Tasty.HUnit as H
 import Test.Tasty.QuickCheck as QC hiding (Witness)
@@ -91,6 +91,30 @@ main = defaultMain $
                 , bip143_p2sh_p2wsh_single_acp
                 ]
             ]
+        , testGroup "BIP341 taproot" [
+              testGroup "key-path (wallet-test-vectors.json)" [
+                  bip341_kp_in0_single
+                , bip341_kp_in1_single_acp
+                , bip341_kp_in3_all
+                , bip341_kp_in4_default
+                , bip341_kp_in6_none
+                , bip341_kp_in7_none_acp
+                , bip341_kp_in8_all_acp
+                ]
+            , testGroup "script-path (rust-bitcoin)" [
+                  rb_script_path_all
+                ]
+            , testGroup "validation" [
+                  taproot_invalid_ht
+                , taproot_invalid_idx
+                , taproot_amounts_mismatch
+                , taproot_spks_mismatch
+                , taproot_bad_annex_prefix
+                , taproot_empty_annex
+                , taproot_short_leaf_hash
+                , taproot_single_oob
+                ]
+            ]
         ]
     , testGroup "properties" [
           testGroup "round-trip" [
@@ -115,6 +139,11 @@ main = defaultMain $
             , prop_sighash_legacy_none_acp_invariant
             , prop_strip_codesep_idempotent
             , prop_strip_codesep_no_0xab_unchanged
+            , prop_taproot_keypath_neq_scriptpath
+            , prop_taproot_csep_changes_hash
+            , prop_taproot_annex_commits
+            , prop_taproot_acp_ignores_other_inputs
+            , prop_taproot_none_ignores_outputs
             ]
         ]
     ]
@@ -1126,4 +1155,279 @@ prop_strip_codesep_no_0xab_unchanged =
   QC.testProperty "strip_codeseparators is no-op without 0xab bytes" $
     forAll (resize 500 $ BS.pack . filter (/= 0xab) <$> arbitrary) $ \s ->
       strip_codeseparators s === s
+
+-- BIP341 taproot test vectors -----------------------------------------------
+
+-- Shared fixture: 9-input / 2-output transaction from BIP341
+-- wallet-test-vectors.json (keyPathSpending[0]).
+bip341Tx :: Tx
+bip341Tx = case from_base16 bip341TxHex of
+  Just t  -> t
+  Nothing -> error "BIP341 tx fixture failed to parse"
+  where
+    bip341TxHex = "020000000001097de20cbff686da83a54981d2b9bab3586f4ca7e48f57f5b55963115f3b334e9c010000000000000000d7b7cab57b1393ace2d064f4d4a2cb8af6def61273e127517d44759b6dafdd990000000000fffffffff8e1f583384333689228c5d28eac13366be082dc57441760d957275419a41842000000006b4830450221008f3b8f8f0537c420654d2283673a761b7ee2ea3c130753103e08ce79201cf32a022079e7ab904a1980ef1c5890b648c8783f4d10103dd62f740d13daa79e298d50c201210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798fffffffff0689180aa63b30cb162a73c6d2a38b7eeda2a83ece74310fda0843ad604853b0100000000feffffffaa5202bdf6d8ccd2ee0f0202afbbb7461d9264a25e5bfd3c5a52ee1239e0ba6c0000000000feffffff956149bdc66faa968eb2be2d2faa29718acbfe3941215893a2a3446d32acd050000000000000000000e664b9773b88c09c32cb70a2a3e4da0ced63b7ba3b22f848531bbb1d5d5f4c94010000000000000000e9aa6b8e6c9de67619e6a3924ae25696bb7b694bb677a632a74ef7eadfd4eabf0000000000ffffffffa778eb6a263dc090464cd125c466b5a99667720b1c110468831d058aa1b82af10100000000ffffffff0200ca9a3b000000001976a91406afd46bcdfd22ef94ac122aa11f241244a37ecc88ac807840cb0000000020ac9a87f5594be208f8532db38cff670c450ed2fea8fcdefcc9a663f78bab962b0141ed7c1647cb97379e76892be0cacff57ec4a7102aa24296ca39af7541246d8ff14d38958d4cc1e2e478e4d4a764bbfd835b16d4e314b72937b29833060b87276c030141052aedffc554b41f52b521071793a6b88d6dbca9dba94cf34c83696de0c1ec35ca9c5ed4ab28059bd606a4f3a657eec0bb96661d42921b5f50a95ad33675b54f83000141ff45f742a876139946a149ab4d9185574b98dc919d2eb6754f8abaa59d18b025637a3aa043b91817739554f4ed2026cf8022dbd83e351ce1fabc272841d2510a010140b4010dd48a617db09926f729e79c33ae0b4e94b79f04a1ae93ede6315eb3669de185a17d2b0ac9ee09fd4c64b678a0b61a0a86fa888a273c8511be83bfd6810f0247304402202b795e4de72646d76eab3f0ab27dfa30b810e856ff3a46c9a702df53bb0d8cc302203ccc4d822edab5f35caddb10af1be93583526ccfbade4b4ead350781e2f8adcd012102f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f90141a3785919a2ce3c4ce26f298c3d51619bc474ae24014bcdd31328cd8cfbab2eff3395fa0a16fe5f486d12f22a9cedded5ae74feb4bbe5351346508c5405bcfee0020141ea0c6ba90763c2d3a296ad82ba45881abb4f426b3f87af162dd24d5109edc1cdd11915095ba47c3a9963dc1e6c432939872bc49212fe34c632cd3ab9fed429c4820141bbc9584a11074e83bc8c6759ec55401f0ae7b03ef290c3139814f545b58a9f8127258000874f44bc46db7646322107d4d86aec8e73b8719a61fff761d75b5dd9810065cd1d"
+
+-- Amounts and scriptPubKeys for the 9 prevouts, in order.
+bip341Amounts :: [Word64]
+bip341Amounts =
+  [ 420000000, 462000000, 294000000, 504000000, 630000000
+  , 378000000, 672000000, 546000000, 588000000
+  ]
+
+bip341Spks :: [BS.ByteString]
+bip341Spks = map hex
+  [ "512053a1f6e454df1aa2776a2814a721372d6258050de330b3c6d10ee8f4e0dda343"
+  , "5120147c9c57132f6e7ecddba9800bb0c4449251c92a1e60371ee77557b6620f3ea3"
+  , "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"
+  , "5120e4d810fd50586274face62b8a807eb9719cef49c04177cc6b76a9a4251d5450e"
+  , "512091b64d5324723a985170e4dc5a0f84c041804f2cd12660fa5dec09fc21783605"
+  , "00147dd65592d0ab2fe0d0257d571abf032cd9db93dc"
+  , "512075169f4001aa68f15bbed28b218df1d0a62cbbcf1188c6665110c293c907b831"
+  , "5120712447206d7a5238acc7ff53fbe94a3b64539ad291c7cdbc490b7577e4b17df5"
+  , "512077e30a5522dd9f894c3f8b8bd4c4b2cf82ca7da8a3ea6a239655c39c050ab220"
+  ]
+
+-- | Run a BIP341 key-path vector against bip341Tx.
+bip341Case :: TestName -> Int -> Word8 -> BS.ByteString -> TestTree
+bip341Case name idx ht expectedHex =
+  H.testCase name $
+    case sighash_taproot_keypath bip341Tx idx
+           bip341Amounts bip341Spks Nothing ht of
+      Nothing  -> H.assertFailure "sighash_taproot_keypath returned Nothing"
+      Just res -> H.assertEqual "sighash mismatch" (hex expectedHex) res
+
+bip341_kp_in0_single :: TestTree
+bip341_kp_in0_single = bip341Case
+  "idx=0, hashType=0x03 (SINGLE)" 0 0x03
+  "2514a6272f85cfa0f45eb907fcb0d121b808ed37c6ea160a5a9046ed5526d555"
+
+bip341_kp_in1_single_acp :: TestTree
+bip341_kp_in1_single_acp = bip341Case
+  "idx=1, hashType=0x83 (SINGLE|ACP)" 1 0x83
+  "325a644af47e8a5a2591cda0ab0723978537318f10e6a63d4eed783b96a71a4d"
+
+bip341_kp_in3_all :: TestTree
+bip341_kp_in3_all = bip341Case
+  "idx=3, hashType=0x01 (ALL)" 3 0x01
+  "bf013ea93474aa67815b1b6cc441d23b64fa310911d991e713cd34c7f5d46669"
+
+bip341_kp_in4_default :: TestTree
+bip341_kp_in4_default = bip341Case
+  "idx=4, hashType=0x00 (DEFAULT)" 4 0x00
+  "4f900a0bae3f1446fd48490c2958b5a023228f01661cda3496a11da502a7f7ef"
+
+bip341_kp_in6_none :: TestTree
+bip341_kp_in6_none = bip341Case
+  "idx=6, hashType=0x02 (NONE)" 6 0x02
+  "15f25c298eb5cdc7eb1d638dd2d45c97c4c59dcaec6679cfc16ad84f30876b85"
+
+bip341_kp_in7_none_acp :: TestTree
+bip341_kp_in7_none_acp = bip341Case
+  "idx=7, hashType=0x82 (NONE|ACP)" 7 0x82
+  "cd292de50313804dabe4685e83f923d2969577191a3e1d2882220dca88cbeb10"
+
+bip341_kp_in8_all_acp :: TestTree
+bip341_kp_in8_all_acp = bip341Case
+  "idx=8, hashType=0x81 (ALL|ACP)" 8 0x81
+  "cccb739eca6c13a8a89e6e5cd317ffe55669bbda23f2fd37b0f18755e008edd2"
+
+-- taproot validation tests --------------------------------------------------
+
+-- A tiny well-formed taproot context for negative tests.
+tinyTaprootTx :: Tx
+tinyTaprootTx = Tx
+  { tx_version   = 2
+  , tx_inputs    = txin :| []
+  , tx_outputs   = txout :| []
+  , tx_witnesses = []
+  , tx_locktime  = 0
+  }
+  where
+    txin = TxIn
+      { txin_prevout    = OutPoint (TxId (BS.replicate 32 0xab)) 0
+      , txin_script_sig = BS.empty
+      , txin_sequence   = 0xffffffff
+      }
+    txout = TxOut
+      { txout_value         = 1000
+      , txout_script_pubkey = hex "5120" <> BS.replicate 32 0x00
+      }
+
+tinyAmts :: [Word64]
+tinyAmts = [100000]
+
+tinySpks :: [BS.ByteString]
+tinySpks = [hex "5120" <> BS.replicate 32 0x00]
+
+taproot_invalid_ht :: TestTree
+taproot_invalid_ht =
+  H.testCase "rejects non-canonical hashType (0x04)" $
+    H.assertEqual "should be Nothing" Nothing $
+      sighash_taproot_keypath tinyTaprootTx 0 tinyAmts tinySpks Nothing 0x04
+
+taproot_invalid_idx :: TestTree
+taproot_invalid_idx =
+  H.testCase "rejects out-of-range input index" $
+    H.assertEqual "should be Nothing" Nothing $
+      sighash_taproot_keypath tinyTaprootTx 7 tinyAmts tinySpks Nothing 0x00
+
+taproot_amounts_mismatch :: TestTree
+taproot_amounts_mismatch =
+  H.testCase "rejects amounts length mismatch" $
+    H.assertEqual "should be Nothing" Nothing $
+      sighash_taproot_keypath tinyTaprootTx 0 [] tinySpks Nothing 0x00
+
+taproot_spks_mismatch :: TestTree
+taproot_spks_mismatch =
+  H.testCase "rejects scriptPubKeys length mismatch" $
+    H.assertEqual "should be Nothing" Nothing $
+      sighash_taproot_keypath tinyTaprootTx 0 tinyAmts [] Nothing 0x00
+
+taproot_bad_annex_prefix :: TestTree
+taproot_bad_annex_prefix =
+  H.testCase "rejects annex without 0x50 prefix" $
+    H.assertEqual "should be Nothing" Nothing $
+      sighash_taproot_keypath tinyTaprootTx 0 tinyAmts tinySpks
+        (Just (BS.pack [0xff, 0xaa])) 0x00
+
+taproot_empty_annex :: TestTree
+taproot_empty_annex =
+  H.testCase "rejects empty annex" $
+    H.assertEqual "should be Nothing" Nothing $
+      sighash_taproot_keypath tinyTaprootTx 0 tinyAmts tinySpks
+        (Just BS.empty) 0x00
+
+taproot_short_leaf_hash :: TestTree
+taproot_short_leaf_hash =
+  H.testCase "scriptpath rejects non-32-byte tap leaf hash" $
+    H.assertEqual "should be Nothing" Nothing $
+      sighash_taproot_scriptpath tinyTaprootTx 0 tinyAmts tinySpks Nothing
+        (BS.replicate 31 0x00) 0xffffffff 0x00
+
+-- BIP341: SIGHASH_SINGLE without a corresponding output is rejected.
+-- tinyTaprootTx has 1 output; idx=0 is in range, so use a 2-input tx
+-- and index the second input with SINGLE (no output 1).
+taproot_single_oob :: TestTree
+taproot_single_oob =
+  H.testCase "rejects SIGHASH_SINGLE with idx >= n_outputs" $
+    let txin2 = TxIn
+          { txin_prevout    = OutPoint (TxId (BS.replicate 32 0xcd)) 0
+          , txin_script_sig = BS.empty
+          , txin_sequence   = 0xffffffff
+          }
+        tx2 = tinyTaprootTx
+          { tx_inputs = (NE.head (tx_inputs tinyTaprootTx)) :| [txin2] }
+        amts = [100000, 200000]
+        spks = tinySpks ++ tinySpks
+    in  H.assertEqual "should be Nothing" Nothing $
+          sighash_taproot_keypath tx2 1 amts spks Nothing 0x03
+
+-- rust-bitcoin script-path vector -------------------------------------------
+
+-- Source: rust-bitcoin bitcoin/src/crypto/sighash.rs,
+-- sighashes_with_script_path_raw_hash test. P2TR input, ALL hashType,
+-- precomputed tap leaf hash, default codesep position.
+-- NOTE: raw hex on a single line to avoid manual-splitting errors.
+rb_script_path_all :: TestTree
+rb_script_path_all = H.testCase
+  "script-path, hashType=0x01 (ALL), default codesep" $ do
+    let rawTx = "020000000189fc651483f9296b906455dd939813bf086b1bbe7c77635e157c8e14ae29062195010000004445b5c7044561320000000000160014331414dbdada7fb578f700f38fb69995fc9b5ab958020000000000001976a914268db0a8104cc6d8afd91233cc8b3d1ace8ac3ef88ac580200000000000017a914ec00dcb368d6a693e11986d265f659d2f59e8be2875802000000000000160014c715799a49a0bae3956df9c17cb4440a673ac0df6f010000"
+        amount = 3468315 :: Word64  -- 0x000000000034ec1b LE
+        spk = hex
+          "512028055142ea437db73382e991861446040b61dd2185c4891d7daf6893d79f7182"
+        leaf = hex
+          "15a2530514e399f8b5cf0b3d3112cf5b289eaa3e308ba2071b58392fdc6da68a"
+        expected = hex
+          "d66de5274a60400c7b08c86ba6b7f198f40660079edf53aca89d2a9501317f2e"
+    case from_base16 rawTx of
+      Nothing -> H.assertFailure "failed to parse tx"
+      Just tx ->
+        case sighash_taproot_scriptpath tx 0 [amount] [spk] Nothing
+               leaf 0xffffffff 0x01 of
+          Nothing  -> H.assertFailure "sighash_taproot_scriptpath returned Nothing"
+          Just res -> H.assertEqual "sighash mismatch" expected res
+
+-- taproot properties --------------------------------------------------------
+
+-- | 32-byte tap leaf hash generator.
+genTapLeaf :: Gen BS.ByteString
+genTapLeaf = BS.pack <$> vectorOf 32 arbitrary
+
+-- key-path and script-path differ in spend_type (0 vs 2) and in the
+-- 37-byte tail appended for script-path. Hashes must differ for any
+-- choice of leaf hash and codeseparator position.
+prop_taproot_keypath_neq_scriptpath :: TestTree
+prop_taproot_keypath_neq_scriptpath =
+  QC.testProperty "taproot key-path /= script-path for any leaf, csep" $
+    forAll genTapLeaf $ \leaf ->
+      forAll (arbitrary :: Gen Word32) $ \csep ->
+        let kp = sighash_taproot_keypath bip341Tx 0
+                   bip341Amounts bip341Spks Nothing 0x00
+            sp = sighash_taproot_scriptpath bip341Tx 0
+                   bip341Amounts bip341Spks Nothing leaf csep 0x00
+        in  kp =/= sp
+
+-- Different codeseparator positions commit to different preimages.
+prop_taproot_csep_changes_hash :: TestTree
+prop_taproot_csep_changes_hash =
+  QC.testProperty "taproot script-path: distinct csep => distinct hash" $
+    forAll genTapLeaf $ \leaf ->
+      forAll (arbitrary :: Gen (Word32, Word32)) $ \(c1, c2) ->
+        c1 /= c2 ==>
+          let mk c = sighash_taproot_scriptpath bip341Tx 0
+                       bip341Amounts bip341Spks Nothing leaf c 0x01
+          in  mk c1 =/= mk c2
+
+-- | Annex generator: arbitrary payload prefixed with the mandatory
+--   0x50 byte.
+genAnnex :: Gen BS.ByteString
+genAnnex = do
+  payload <- resize 64 arbitrary
+  pure (BS.cons 0x50 (BS.pack payload))
+
+-- Distinct well-formed annexes produce distinct sighashes, confirming
+-- the annex bytes are committed to the preimage.
+prop_taproot_annex_commits :: TestTree
+prop_taproot_annex_commits =
+  QC.testProperty "taproot distinct annexes yield distinct hashes" $
+    forAll genAnnex $ \a1 ->
+      forAll genAnnex $ \a2 ->
+        a1 /= a2 ==>
+          let mk a = sighash_taproot_keypath bip341Tx 0
+                       bip341Amounts bip341Spks (Just a) 0x01
+          in  mk a1 =/= mk a2
+
+-- ANYONECANPAY omits sha_prevouts, sha_amounts, sha_scriptpubkeys, and
+-- sha_sequences from the preimage. Permuting the OTHER (non-signing)
+-- entries in amounts and scriptPubKeys must not change the hash.
+prop_taproot_acp_ignores_other_inputs :: TestTree
+prop_taproot_acp_ignores_other_inputs =
+  QC.testProperty "taproot ACP ignores other inputs' amounts/spks" $
+    let idx = 0
+        ht  = 0x81 :: Word8  -- ALL|ACP
+        h1  = sighash_taproot_keypath bip341Tx idx
+                bip341Amounts bip341Spks Nothing ht
+        -- Mutate the *other* amounts and scriptPubKeys arbitrarily.
+        mutAmts = take 1 bip341Amounts ++ map (* 7) (drop 1 bip341Amounts)
+        mutSpks = take 1 bip341Spks
+               ++ map (BS.cons 0xff) (drop 1 bip341Spks)
+        h2  = sighash_taproot_keypath bip341Tx idx
+                mutAmts mutSpks Nothing ht
+    in  h1 === h2
+
+-- For NONE (no SINGLE bit), sha_outputs is omitted. Appending extra
+-- outputs to the tx must not change the hash.
+prop_taproot_none_ignores_outputs :: TestTree
+prop_taproot_none_ignores_outputs =
+  QC.testProperty "taproot NONE ignores appended outputs" $
+    forAll (QC.listOf1 (arbitrary :: Gen TxOut)) $ \extras ->
+      let idx = 6
+          ht  = 0x02 :: Word8  -- NONE
+          tx' = bip341Tx
+            { tx_outputs = appendOutputs (tx_outputs bip341Tx) extras }
+          h1 = sighash_taproot_keypath bip341Tx idx
+                 bip341Amounts bip341Spks Nothing ht
+          h2 = sighash_taproot_keypath tx' idx
+                 bip341Amounts bip341Spks Nothing ht
+      in  h1 === h2
 

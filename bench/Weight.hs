@@ -109,6 +109,18 @@ sampleScriptCode = BS.replicate 26 0x00
 sampleValue :: Word64
 sampleValue = 100000000
 
+sampleTaprootSpk :: BS.ByteString
+sampleTaprootSpk = BS.cons 0x51 (BS.cons 0x20 (BS.replicate 32 0x00))
+
+taprootAmts :: Int -> [Word64]
+taprootAmts n = replicate n sampleValue
+
+taprootSpks :: Int -> [BS.ByteString]
+taprootSpks n = replicate n sampleTaprootSpk
+
+sampleTapLeaf :: BS.ByteString
+sampleTapLeaf = BS.replicate 32 0x00
+
 -- allocation benchmarks -------------------------------------------------------
 
 main :: IO ()
@@ -172,8 +184,41 @@ main = W.mainWith $ do
       (sighashSegwit mediumSegwitTx SIGHASH_SINGLE) 0
     W.func "sighash_segwit/medium / SIGHASH_ALL|ACP"
       (sighashSegwit mediumSegwitTx SIGHASH_ALL_ANYONECANPAY) 0
+
+    -- sighash_taproot_keypath
+    W.func "sighash_taproot_keypath/small  / DEFAULT"
+      (taprootKp smallSegwitTx  0x00) 0
+    W.func "sighash_taproot_keypath/medium / DEFAULT"
+      (taprootKp mediumSegwitTx 0x00) 0
+    W.func "sighash_taproot_keypath/large  / DEFAULT"
+      (taprootKp largeSegwitTx  0x00) 0
+    W.func "sighash_taproot_keypath/medium / ALL"
+      (taprootKp mediumSegwitTx 0x01) 0
+    W.func "sighash_taproot_keypath/medium / NONE"
+      (taprootKp mediumSegwitTx 0x02) 0
+    W.func "sighash_taproot_keypath/medium / SINGLE"
+      (taprootKp mediumSegwitTx 0x03) 0
+    W.func "sighash_taproot_keypath/medium / ALL|ACP"
+      (taprootKp mediumSegwitTx 0x81) 0
+
+    -- sighash_taproot_scriptpath
+    W.func "sighash_taproot_scriptpath/small  / DEFAULT"
+      (taprootSp smallSegwitTx  0x00) 0
+    W.func "sighash_taproot_scriptpath/medium / DEFAULT"
+      (taprootSp mediumSegwitTx 0x00) 0
+    W.func "sighash_taproot_scriptpath/large  / DEFAULT"
+      (taprootSp largeSegwitTx  0x00) 0
   where
     sighashLegacy tx st i =
       sighash_legacy tx i sampleScriptPubKey (encode_sighash st)
     sighashSegwit tx st i =
       sighash_segwit tx i sampleScriptCode sampleValue (encode_sighash st)
+    taprootKp tx ht i =
+      let n = length (tx_inputs tx)
+      in  sighash_taproot_keypath tx i
+            (taprootAmts n) (taprootSpks n) Nothing ht
+    taprootSp tx ht i =
+      let n = length (tx_inputs tx)
+      in  sighash_taproot_scriptpath tx i
+            (taprootAmts n) (taprootSpks n) Nothing
+            sampleTapLeaf 0xffffffff ht
