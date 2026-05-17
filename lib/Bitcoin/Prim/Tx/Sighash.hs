@@ -123,7 +123,9 @@ hash256 = SHA256.hash . SHA256.hash
 --   On a malformed script (truncated push data), the malformed tail is
 --   copied verbatim without further codeseparator processing.
 strip_codeseparators :: BS.ByteString -> BS.ByteString
-strip_codeseparators = BS.pack . go . BS.unpack
+strip_codeseparators !script
+  | not (0xab `BS.elem` script) = script  -- fast path: nothing to strip
+  | otherwise = BS.pack (go (BS.unpack script))
   where
     go :: [Word8] -> [Word8]
     go [] = []
@@ -149,13 +151,14 @@ strip_codeseparators = BS.pack . go . BS.unpack
           _ -> b : rest
       | otherwise              = b : go rest
 
-    -- | Copy a push header and N data bytes verbatim. If the script is
-    --   truncated, copy whatever's available and stop processing.
+    -- | Copy a push header and N data bytes verbatim. On truncation,
+    --   @splitAt@ yields @(available, [])@ so @go []@ closes the
+    --   recursion naturally; the malformed tail is preserved.
     push :: Int -> [Word8] -> [Word8] -> [Word8]
     push !len !header !rest =
       let (chunk, rest') = splitAt len rest
-      in  header ++ chunk ++
-            if length chunk == len then go rest' else []
+      in  header ++ chunk ++ go rest'
+{-# INLINABLE strip_codeseparators #-}
 
 -- legacy sighash -------------------------------------------------------------
 
@@ -176,6 +179,12 @@ strip_codeseparators = BS.pack . go . BS.unpack
 --   For base SIGHASH_SINGLE with input index >= output count, returns
 --   the special \"sighash single bug\" value (0x01 followed by 31 zero
 --   bytes).
+--
+--   The input index is /not/ validated against the input count; an
+--   out-of-range @idx@ produces a deterministic but
+--   consensus-undefined hash. Matches Bitcoin Core, which @assert@s on
+--   the same precondition. Contrast 'sighash_segwit', which validates
+--   and returns 'Nothing'.
 sighash_legacy
   :: Tx
   -> Int              -- ^ input index

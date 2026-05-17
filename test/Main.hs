@@ -14,7 +14,7 @@ import Test.Tasty
 import qualified Test.Tasty.HUnit as H
 import Test.Tasty.QuickCheck as QC hiding (Witness)
 import Test.QuickCheck
-  ( Gen, Arbitrary(..), elements, oneof, chooseInt, forAll, (==>) )
+  ( Gen, Arbitrary(..), elements, oneof, chooseInt, forAll, resize, (==>) )
 
 -- main ------------------------------------------------------------------------
 
@@ -66,6 +66,9 @@ main = defaultMain $
                 , codesep_strip_simple
                 , codesep_inside_push
                 , codesep_inside_pushdata1
+                , codesep_inside_pushdata2
+                , codesep_inside_pushdata4
+                , codesep_malformed_tail
                 ]
             , testGroup "Bitcoin Core sighash.json" [
                   bc_sighash_1
@@ -1081,6 +1084,32 @@ codesep_inside_pushdata1 =
         expected = BS.pack [0x4c, 0x03, 0xab, 0xab, 0xab, 0x51]
     in  H.assertEqual "" expected (strip_codeseparators input)
 
+-- OP_PUSHDATA2 with 2 bytes of 0xab data (LE length = 0x0002), then a
+-- lone 0xab opcode and OP_1. Exercises the n0 + n1 * 0x100 arithmetic.
+codesep_inside_pushdata2 :: TestTree
+codesep_inside_pushdata2 =
+  H.testCase "OP_PUSHDATA2 data preserved, trailing 0xab stripped" $
+    let input    = BS.pack [0x4d, 0x02, 0x00, 0xab, 0xab, 0xab, 0x51]
+        expected = BS.pack [0x4d, 0x02, 0x00, 0xab, 0xab, 0x51]
+    in  H.assertEqual "" expected (strip_codeseparators input)
+
+-- OP_PUSHDATA4 with 1 byte of 0xab data (LE length = 0x00000001), then
+-- a lone 0xab opcode. Exercises the 4-byte LE length decode.
+codesep_inside_pushdata4 :: TestTree
+codesep_inside_pushdata4 =
+  H.testCase "OP_PUSHDATA4 data preserved, trailing 0xab stripped" $
+    let input    = BS.pack [0x4e, 0x01, 0x00, 0x00, 0x00, 0xab, 0xab, 0x51]
+        expected = BS.pack [0x4e, 0x01, 0x00, 0x00, 0x00, 0xab, 0x51]
+    in  H.assertEqual "" expected (strip_codeseparators input)
+
+-- Malformed tail: OP_PUSHDATA2 with a truncated length header (only
+-- one byte available). Per docstring, copied verbatim.
+codesep_malformed_tail :: TestTree
+codesep_malformed_tail =
+  H.testCase "malformed tail copied verbatim" $
+    let input = BS.pack [0x4d, 0x00]
+    in  H.assertEqual "" input (strip_codeseparators input)
+
 -- | Arbitrary ByteString generator (QuickCheck has no built-in instance).
 genByteString :: Gen BS.ByteString
 genByteString = BS.pack <$> arbitrary
@@ -1095,6 +1124,6 @@ prop_strip_codesep_idempotent =
 prop_strip_codesep_no_0xab_unchanged :: TestTree
 prop_strip_codesep_no_0xab_unchanged =
   QC.testProperty "strip_codeseparators is no-op without 0xab bytes" $
-    forAll (BS.pack . filter (/= 0xab) <$> arbitrary) $ \s ->
+    forAll (resize 500 $ BS.pack . filter (/= 0xab) <$> arbitrary) $ \s ->
       strip_codeseparators s === s
 
