@@ -1,6 +1,7 @@
 {-# OPTIONS_HADDOCK prune #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- |
@@ -9,7 +10,8 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- Sighash computation for legacy and BIP143 segwit transactions.
+-- Sighash computation for legacy, BIP143 segwit, and BIP341 taproot
+-- transactions.
 
 module Bitcoin.Prim.Tx.Sighash (
     -- * Sighash Types
@@ -21,6 +23,10 @@ module Bitcoin.Prim.Tx.Sighash (
 
     -- * BIP143 Segwit Sighash
   , sighash_segwit
+
+    -- * BIP341 Taproot Sighash
+  , sighash_taproot_keypath
+  , sighash_taproot_scriptpath
 
     -- * Internal
   , strip_codeseparators
@@ -37,6 +43,7 @@ import Bitcoin.Prim.Tx
     , put_txout
     , to_strict
     )
+import Control.Monad (guard)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
@@ -383,3 +390,191 @@ build_bip143_preimage Tx{..} !idx !script_code !value !ht = do
     <> BSB.byteString hash_outputs
     <> put_word32_le tx_locktime
     <> put_word32_le ht
+
+-- BIP341 taproot sighash ----------------------------------------------------
+
+-- | Precomputed BIP340 tagged-hash key for @\"TapSighash\"@.
+tap_sighash_tag :: BS.ByteString
+tap_sighash_tag = SHA256.hash "TapSighash"
+{-# NOINLINE tap_sighash_tag #-}
+
+-- | BIP340 tagged hash with the @\"TapSighash\"@ tag:
+--   @SHA256(tag_hash || tag_hash || msg)@.
+tap_sighash :: BS.ByteString -> BS.ByteString
+tap_sighash !msg =
+  SHA256.hash (tap_sighash_tag <> tap_sighash_tag <> msg)
+{-# INLINE tap_sighash #-}
+
+-- | Single SHA256 of a Builder's output.
+sha :: BSB.Builder -> BS.ByteString
+sha = SHA256.hash . to_strict
+{-# INLINE sha #-}
+
+-- | Compact-size length-prefixed bytes (Bitcoin @ser_string@).
+put_bytes :: BS.ByteString -> BSB.Builder
+put_bytes !bs =
+     put_compact (fromIntegral (BS.length bs))
+  <> BSB.byteString bs
+{-# INLINE put_bytes #-}
+
+-- | Valid taproot hash types per BIP341: 0x00 (DEFAULT), 0x01..0x03,
+--   0x81..0x83. Non-canonical values are signalled as invalid in
+--   contrast with legacy\/segwit, which commit arbitrary 32-bit values.
+is_valid_taproot_ht :: Word8 -> Bool
+is_valid_taproot_ht !ht =
+     ht == 0x00 || ht == 0x01 || ht == 0x02 || ht == 0x03
+  || ht == 0x81 || ht == 0x82 || ht == 0x83
+{-# INLINE is_valid_taproot_ht #-}
+
+-- | Compute BIP341 taproot sighash for a /key-path/ spend.
+--
+--   The caller must supply, in input order, the amount and
+--   scriptPubKey of every previous output being spent (the entire
+--   set is committed to the preimage when not using
+--   @SIGHASH_ANYONECANPAY@).
+--
+--   The annex, if present, must include the mandatory 0x50 prefix
+--   byte (as it appears in the witness).
+--
+--   Returns 'Nothing' if any of the following holds:
+--
+--     * @hash_type@ is not a canonical taproot value
+--     * the input index is out of range
+--     * @amounts@ or @scriptPubKeys@ does not match the input count
+--     * a non-empty annex is supplied without the 0x50 prefix
+--
+--   @
+--   sighash_taproot_keypath tx 0 amounts scriptPubKeys Nothing 0x00
+--   @
+sighash_taproot_keypath
+  :: Tx
+  -> Int                  -- ^ input index
+  -> [Word64]             -- ^ amounts for all inputs (in order)
+  -> [BS.ByteString]      -- ^ scriptPubKeys for all inputs (in order)
+  -> Maybe BS.ByteString  -- ^ optional annex (including 0x50 prefix)
+  -> Word8                -- ^ hash type
+  -> Maybe BS.ByteString  -- ^ 32-byte hash, or Nothing on invalid input
+sighash_taproot_keypath !tx !idx !amts !spks !annex !ht =
+  taproot_sighash tx idx amts spks annex Nothing ht
+
+-- | Compute BIP341 taproot sighash for a /script-path/ (tapscript)
+--   spend.
+--
+--   In addition to the key-path inputs, takes:
+--
+--     * the 32-byte tap leaf hash (BIP342: tagged hash of @leaf_ver ||
+--       ser_string(script)@), computed by the caller
+--     * the codeseparator position (0xffffffff if none was executed)
+--
+--   Returns 'Nothing' under the same conditions as
+--   'sighash_taproot_keypath', plus when @tap_leaf_hash@ is not
+--   exactly 32 bytes.
+sighash_taproot_scriptpath
+  :: Tx
+  -> Int                  -- ^ input index
+  -> [Word64]             -- ^ amounts for all inputs (in order)
+  -> [BS.ByteString]      -- ^ scriptPubKeys for all inputs (in order)
+  -> Maybe BS.ByteString  -- ^ optional annex (including 0x50 prefix)
+  -> BS.ByteString        -- ^ tap leaf hash (32 bytes)
+  -> Word32               -- ^ codeseparator position
+  -> Word8                -- ^ hash type
+  -> Maybe BS.ByteString
+sighash_taproot_scriptpath !tx !idx !amts !spks !annex !leaf !csep !ht =
+  taproot_sighash tx idx amts spks annex (Just (leaf, csep)) ht
+
+-- | Internal worker shared by 'sighash_taproot_keypath' and
+--   'sighash_taproot_scriptpath'. @Nothing@ for the extension argument
+--   selects the key-path; @Just (leaf_hash, codesep_pos)@ selects the
+--   script-path.
+taproot_sighash
+  :: Tx
+  -> Int
+  -> [Word64]
+  -> [BS.ByteString]
+  -> Maybe BS.ByteString
+  -> Maybe (BS.ByteString, Word32)
+  -> Word8
+  -> Maybe BS.ByteString
+taproot_sighash Tx{..} !idx !amts !spks !annex !sp_ext !ht = do
+  guard (is_valid_taproot_ht ht)
+  case annex of
+    Just a  -> guard (not (BS.null a) && BS.index a 0 == 0x50)
+    Nothing -> pure ()
+  case sp_ext of
+    Just (lh, _) -> guard (BS.length lh == 32)
+    Nothing      -> pure ()
+
+  let !inputs_list  = NE.toList tx_inputs
+      !outputs_list = NE.toList tx_outputs
+      !n_inputs     = length inputs_list
+
+  guard (idx >= 0 && idx < n_inputs)
+  guard (length amts == n_inputs)
+  guard (length spks == n_inputs)
+
+  signing_input  <- safe_index inputs_list idx
+  signing_amount <- safe_index amts         idx
+  signing_spk    <- safe_index spks         idx
+
+  let -- BIP341 maps DEFAULT (0x00) to ALL for output handling.
+      out_type | ht == 0x00 = 0x01 :: Word8
+               | otherwise  = ht .&. 0x03
+      acp           = (ht .&. 0x80) /= 0
+      annex_present = case annex  of Just _ -> True; Nothing -> False
+      ext_flag      = case sp_ext of Just _ -> 1;    Nothing -> 0 :: Word8
+      spend_type    = ext_flag * 2 + (if annex_present then 1 else 0)
+
+      -- Lazily bound: ACP omits these four; NONE/SINGLE omit sha_outputs.
+      sha_prevouts =
+        sha (foldMap (put_outpoint . txin_prevout) inputs_list)
+      sha_amounts       = sha (foldMap put_word64_le amts)
+      sha_scriptpubkeys = sha (foldMap put_bytes spks)
+      sha_sequences     =
+        sha (foldMap (put_word32_le . txin_sequence) inputs_list)
+      sha_outputs_all   = sha (foldMap put_txout outputs_list)
+
+      sha_annex_bs = case annex of
+        Just a  -> sha (put_bytes a)
+        Nothing -> BS.empty
+
+      -- BIP341: for SINGLE with idx >= n_outputs, use 32 zero bytes
+      -- (the resulting signature is consensus-invalid).
+      sha_single_output_bs = case safe_index outputs_list idx of
+        Just o  -> sha (put_txout o)
+        Nothing -> zero32
+
+      msg = to_strict $
+           BSB.word8 0x00              -- epoch
+        <> BSB.word8 ht                -- hash_type
+        <> put_word32_le tx_version
+        <> put_word32_le tx_locktime
+        <> (if acp
+              then mempty
+              else BSB.byteString sha_prevouts
+                <> BSB.byteString sha_amounts
+                <> BSB.byteString sha_scriptpubkeys
+                <> BSB.byteString sha_sequences)
+        <> (if out_type == 0x01
+              then BSB.byteString sha_outputs_all
+              else mempty)
+        <> BSB.word8 spend_type
+        <> (if acp
+              then put_outpoint   (txin_prevout signing_input)
+                <> put_word64_le  signing_amount
+                <> put_bytes      signing_spk
+                <> put_word32_le  (txin_sequence signing_input)
+              else put_word32_le (fromIntegral idx))
+        <> (if annex_present
+              then BSB.byteString sha_annex_bs
+              else mempty)
+        <> (if out_type == 0x03
+              then BSB.byteString sha_single_output_bs
+              else mempty)
+        <> (case sp_ext of
+              Just (leaf, csep) ->
+                   BSB.byteString leaf
+                <> BSB.word8 0x00       -- key_version
+                <> put_word32_le csep
+              Nothing -> mempty)
+
+  pure $! tap_sighash msg

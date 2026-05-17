@@ -112,6 +112,22 @@ sampleScriptCode = BS.replicate 26 0x00
 sampleValue :: Word64
 sampleValue = 100000000
 
+-- | Typical P2TR scriptPubKey (34 bytes): OP_1 || 0x20 || 32-byte
+--   x-only pubkey.
+sampleTaprootSpk :: BS.ByteString
+sampleTaprootSpk = BS.cons 0x51 (BS.cons 0x20 (BS.replicate 32 0x00))
+
+-- | Amounts/scriptPubKeys lists sized to a tx's input count.
+taprootAmts :: Int -> [Word64]
+taprootAmts n = replicate n sampleValue
+
+taprootSpks :: Int -> [BS.ByteString]
+taprootSpks n = replicate n sampleTaprootSpk
+
+-- | 32-byte placeholder tap leaf hash for script-path benches.
+sampleTapLeaf :: BS.ByteString
+sampleTapLeaf = BS.replicate 32 0x00
+
 -- benchmarks ------------------------------------------------------------------
 
 main :: IO ()
@@ -181,6 +197,20 @@ main = defaultMain
                 nf (sighashSegwit mediumSegwitTx
                       SIGHASH_ALL_ANYONECANPAY)                  0
             ]
+        , bgroup "sighash_taproot_keypath"
+            [ bench "small  / DEFAULT" $ nf (taprootKp smallSegwitTx  0x00) 0
+            , bench "medium / DEFAULT" $ nf (taprootKp mediumSegwitTx 0x00) 0
+            , bench "large  / DEFAULT" $ nf (taprootKp largeSegwitTx  0x00) 0
+            , bench "medium / ALL"     $ nf (taprootKp mediumSegwitTx 0x01) 0
+            , bench "medium / NONE"    $ nf (taprootKp mediumSegwitTx 0x02) 0
+            , bench "medium / SINGLE"  $ nf (taprootKp mediumSegwitTx 0x03) 0
+            , bench "medium / ALL|ACP" $ nf (taprootKp mediumSegwitTx 0x81) 0
+            ]
+        , bgroup "sighash_taproot_scriptpath"
+            [ bench "small  / DEFAULT" $ nf (taprootSp smallSegwitTx  0x00) 0
+            , bench "medium / DEFAULT" $ nf (taprootSp mediumSegwitTx 0x00) 0
+            , bench "large  / DEFAULT" $ nf (taprootSp largeSegwitTx  0x00) 0
+            ]
         ]
     ]
   where
@@ -188,3 +218,12 @@ main = defaultMain
       sighash_legacy tx i sampleScriptPubKey (encode_sighash st)
     sighashSegwit tx st i =
       sighash_segwit tx i sampleScriptCode sampleValue (encode_sighash st)
+    taprootKp tx ht i =
+      let n = length (tx_inputs tx)
+      in  sighash_taproot_keypath tx i
+            (taprootAmts n) (taprootSpks n) Nothing ht
+    taprootSp tx ht i =
+      let n = length (tx_inputs tx)
+      in  sighash_taproot_scriptpath tx i
+            (taprootAmts n) (taprootSpks n) Nothing
+            sampleTapLeaf 0xffffffff ht
