@@ -101,6 +101,9 @@ main = defaultMain $
                 , bip341_kp_in7_none_acp
                 , bip341_kp_in8_all_acp
                 ]
+            , testGroup "script-path (rust-bitcoin)" [
+                  rb_script_path_all
+                ]
             , testGroup "validation" [
                   taproot_invalid_ht
                 , taproot_invalid_idx
@@ -109,6 +112,7 @@ main = defaultMain $
                 , taproot_bad_annex_prefix
                 , taproot_empty_annex
                 , taproot_short_leaf_hash
+                , taproot_single_oob
                 ]
             ]
         ]
@@ -136,6 +140,8 @@ main = defaultMain $
             , prop_strip_codesep_idempotent
             , prop_strip_codesep_no_0xab_unchanged
             , prop_taproot_keypath_neq_scriptpath
+            , prop_taproot_csep_changes_hash
+            , prop_taproot_annex_commits
             , prop_taproot_acp_ignores_other_inputs
             , prop_taproot_none_ignores_outputs
             ]
@@ -1298,20 +1304,98 @@ taproot_short_leaf_hash =
       sighash_taproot_scriptpath tinyTaprootTx 0 tinyAmts tinySpks Nothing
         (BS.replicate 31 0x00) 0xffffffff 0x00
 
+-- BIP341: SIGHASH_SINGLE without a corresponding output is rejected.
+-- tinyTaprootTx has 1 output; idx=0 is in range, so use a 2-input tx
+-- and index the second input with SINGLE (no output 1).
+taproot_single_oob :: TestTree
+taproot_single_oob =
+  H.testCase "rejects SIGHASH_SINGLE with idx >= n_outputs" $
+    let txin2 = TxIn
+          { txin_prevout    = OutPoint (TxId (BS.replicate 32 0xcd)) 0
+          , txin_script_sig = BS.empty
+          , txin_sequence   = 0xffffffff
+          }
+        tx2 = tinyTaprootTx
+          { tx_inputs = (NE.head (tx_inputs tinyTaprootTx)) :| [txin2] }
+        amts = [100000, 200000]
+        spks = tinySpks ++ tinySpks
+    in  H.assertEqual "should be Nothing" Nothing $
+          sighash_taproot_keypath tx2 1 amts spks Nothing 0x03
+
+-- rust-bitcoin script-path vector -------------------------------------------
+
+-- Source: rust-bitcoin bitcoin/src/crypto/sighash.rs,
+-- sighashes_with_script_path_raw_hash test. P2TR input, ALL hashType,
+-- precomputed tap leaf hash, default codesep position.
+-- NOTE: raw hex on a single line to avoid manual-splitting errors.
+rb_script_path_all :: TestTree
+rb_script_path_all = H.testCase
+  "script-path, hashType=0x01 (ALL), default codesep" $ do
+    let rawTx = "020000000189fc651483f9296b906455dd939813bf086b1bbe7c77635e157c8e14ae29062195010000004445b5c7044561320000000000160014331414dbdada7fb578f700f38fb69995fc9b5ab958020000000000001976a914268db0a8104cc6d8afd91233cc8b3d1ace8ac3ef88ac580200000000000017a914ec00dcb368d6a693e11986d265f659d2f59e8be2875802000000000000160014c715799a49a0bae3956df9c17cb4440a673ac0df6f010000"
+        amount = 3468315 :: Word64  -- 0x000000000034ec1b LE
+        spk = hex
+          "512028055142ea437db73382e991861446040b61dd2185c4891d7daf6893d79f7182"
+        leaf = hex
+          "15a2530514e399f8b5cf0b3d3112cf5b289eaa3e308ba2071b58392fdc6da68a"
+        expected = hex
+          "d66de5274a60400c7b08c86ba6b7f198f40660079edf53aca89d2a9501317f2e"
+    case from_base16 rawTx of
+      Nothing -> H.assertFailure "failed to parse tx"
+      Just tx ->
+        case sighash_taproot_scriptpath tx 0 [amount] [spk] Nothing
+               leaf 0xffffffff 0x01 of
+          Nothing  -> H.assertFailure "sighash_taproot_scriptpath returned Nothing"
+          Just res -> H.assertEqual "sighash mismatch" expected res
+
 -- taproot properties --------------------------------------------------------
 
+-- | 32-byte tap leaf hash generator.
+genTapLeaf :: Gen BS.ByteString
+genTapLeaf = BS.pack <$> vectorOf 32 arbitrary
+
 -- key-path and script-path differ in spend_type (0 vs 2) and in the
--- 37-byte tail appended for script-path. Hashes must differ for the
--- same other inputs.
+-- 37-byte tail appended for script-path. Hashes must differ for any
+-- choice of leaf hash and codeseparator position.
 prop_taproot_keypath_neq_scriptpath :: TestTree
 prop_taproot_keypath_neq_scriptpath =
-  QC.testProperty "taproot key-path /= script-path for same args" $
-    let kp = sighash_taproot_keypath bip341Tx 0
-               bip341Amounts bip341Spks Nothing 0x00
-        sp = sighash_taproot_scriptpath bip341Tx 0
-               bip341Amounts bip341Spks Nothing
-               (BS.replicate 32 0xaa) 0xffffffff 0x00
-    in  kp =/= sp
+  QC.testProperty "taproot key-path /= script-path for any leaf, csep" $
+    forAll genTapLeaf $ \leaf ->
+      forAll (arbitrary :: Gen Word32) $ \csep ->
+        let kp = sighash_taproot_keypath bip341Tx 0
+                   bip341Amounts bip341Spks Nothing 0x00
+            sp = sighash_taproot_scriptpath bip341Tx 0
+                   bip341Amounts bip341Spks Nothing leaf csep 0x00
+        in  kp =/= sp
+
+-- Different codeseparator positions commit to different preimages.
+prop_taproot_csep_changes_hash :: TestTree
+prop_taproot_csep_changes_hash =
+  QC.testProperty "taproot script-path: distinct csep => distinct hash" $
+    forAll genTapLeaf $ \leaf ->
+      forAll (arbitrary :: Gen (Word32, Word32)) $ \(c1, c2) ->
+        c1 /= c2 ==>
+          let mk c = sighash_taproot_scriptpath bip341Tx 0
+                       bip341Amounts bip341Spks Nothing leaf c 0x01
+          in  mk c1 =/= mk c2
+
+-- | Annex generator: arbitrary payload prefixed with the mandatory
+--   0x50 byte.
+genAnnex :: Gen BS.ByteString
+genAnnex = do
+  payload <- resize 64 arbitrary
+  pure (BS.cons 0x50 (BS.pack payload))
+
+-- Distinct well-formed annexes produce distinct sighashes, confirming
+-- the annex bytes are committed to the preimage.
+prop_taproot_annex_commits :: TestTree
+prop_taproot_annex_commits =
+  QC.testProperty "taproot distinct annexes yield distinct hashes" $
+    forAll genAnnex $ \a1 ->
+      forAll genAnnex $ \a2 ->
+        a1 /= a2 ==>
+          let mk a = sighash_taproot_keypath bip341Tx 0
+                       bip341Amounts bip341Spks (Just a) 0x01
+          in  mk a1 =/= mk a2
 
 -- ANYONECANPAY omits sha_prevouts, sha_amounts, sha_scriptpubkeys, and
 -- sha_sequences from the preimage. Permuting the OTHER (non-signing)

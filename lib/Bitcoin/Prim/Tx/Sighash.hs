@@ -441,7 +441,10 @@ is_valid_taproot_ht !ht =
 --     * @hash_type@ is not a canonical taproot value
 --     * the input index is out of range
 --     * @amounts@ or @scriptPubKeys@ does not match the input count
---     * a non-empty annex is supplied without the 0x50 prefix
+--     * an annex is supplied without the 0x50 prefix or is empty
+--     * @hash_type@ is @SIGHASH_SINGLE@ (or its ACP variant) and the
+--       input index has no corresponding output (such a signature
+--       would be consensus-invalid per BIP341)
 --
 --   @
 --   sighash_taproot_keypath tx 0 amounts scriptPubKeys Nothing 0x00
@@ -507,10 +510,15 @@ taproot_sighash Tx{..} !idx !amts !spks !annex !sp_ext !ht = do
   let !inputs_list  = NE.toList tx_inputs
       !outputs_list = NE.toList tx_outputs
       !n_inputs     = length inputs_list
+      !n_outputs    = length outputs_list
 
   guard (idx >= 0 && idx < n_inputs)
   guard (length amts == n_inputs)
   guard (length spks == n_inputs)
+  -- BIP341: SIGHASH_SINGLE without a corresponding output is invalid;
+  -- reject rather than return a digest no consensus-valid signature
+  -- could match.
+  guard (ht .&. 0x03 /= 0x03 || idx < n_outputs)
 
   signing_input  <- safe_index inputs_list idx
   signing_amount <- safe_index amts         idx
@@ -537,11 +545,11 @@ taproot_sighash Tx{..} !idx !amts !spks !annex !sp_ext !ht = do
         Just a  -> sha (put_bytes a)
         Nothing -> BS.empty
 
-      -- BIP341: for SINGLE with idx >= n_outputs, use 32 zero bytes
-      -- (the resulting signature is consensus-invalid).
+      -- safe_index always succeeds for SINGLE post-guard above; the
+      -- fallback is defensive and unreachable in practice.
       sha_single_output_bs = case safe_index outputs_list idx of
         Just o  -> sha (put_txout o)
-        Nothing -> zero32
+        Nothing -> BS.empty
 
       msg = to_strict $
            BSB.word8 0x00              -- epoch
