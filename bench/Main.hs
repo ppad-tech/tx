@@ -7,6 +7,7 @@ import Control.DeepSeq
 import Criterion.Main
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Word (Word64)
 
 import Bitcoin.Prim.Tx
 import Bitcoin.Prim.Tx.Sighash
@@ -97,6 +98,20 @@ smallSegwitBytes  = to_bytes smallSegwitTx
 mediumSegwitBytes = to_bytes mediumSegwitTx
 largeSegwitBytes  = to_bytes largeSegwitTx
 
+-- sighash inputs --------------------------------------------------------------
+
+-- | Typical P2PKH scriptPubKey (25 bytes).
+sampleScriptPubKey :: BS.ByteString
+sampleScriptPubKey = BS.replicate 25 0x00
+
+-- | Typical P2WPKH scriptCode (26 bytes).
+sampleScriptCode :: BS.ByteString
+sampleScriptCode = BS.replicate 26 0x00
+
+-- | Sample input value (1 BTC in satoshis).
+sampleValue :: Word64
+sampleValue = 100000000
+
 -- benchmarks ------------------------------------------------------------------
 
 main :: IO ()
@@ -135,4 +150,41 @@ main = defaultMain
         , bench "large-legacy"  $ nf txid largeLegacyTx
         , bench "large-segwit"  $ nf txid largeSegwitTx
         ]
+    , bgroup "sighash"
+        [ bgroup "sighash_legacy"
+            [ bench "small  / SIGHASH_ALL"    $
+                nf (sighashLegacy smallLegacyTx  SIGHASH_ALL)    0
+            , bench "medium / SIGHASH_ALL"    $
+                nf (sighashLegacy mediumLegacyTx SIGHASH_ALL)    0
+            , bench "large  / SIGHASH_ALL"    $
+                nf (sighashLegacy largeLegacyTx  SIGHASH_ALL)    0
+            , bench "medium / SIGHASH_NONE"   $
+                nf (sighashLegacy mediumLegacyTx SIGHASH_NONE)   0
+            , bench "medium / SIGHASH_SINGLE" $
+                nf (sighashLegacy mediumLegacyTx SIGHASH_SINGLE) 0
+            , bench "medium / SIGHASH_ALL|ACP" $
+                nf (sighashLegacy mediumLegacyTx
+                      SIGHASH_ALL_ANYONECANPAY)                  0
+            ]
+        , bgroup "sighash_segwit"
+            [ bench "small  / SIGHASH_ALL"    $
+                nf (sighashSegwit smallSegwitTx  SIGHASH_ALL)    0
+            , bench "medium / SIGHASH_ALL"    $
+                nf (sighashSegwit mediumSegwitTx SIGHASH_ALL)    0
+            , bench "large  / SIGHASH_ALL"    $
+                nf (sighashSegwit largeSegwitTx  SIGHASH_ALL)    0
+            , bench "medium / SIGHASH_NONE"   $
+                nf (sighashSegwit mediumSegwitTx SIGHASH_NONE)   0
+            , bench "medium / SIGHASH_SINGLE" $
+                nf (sighashSegwit mediumSegwitTx SIGHASH_SINGLE) 0
+            , bench "medium / SIGHASH_ALL|ACP" $
+                nf (sighashSegwit mediumSegwitTx
+                      SIGHASH_ALL_ANYONECANPAY)                  0
+            ]
+        ]
     ]
+  where
+    sighashLegacy tx st i =
+      sighash_legacy tx i sampleScriptPubKey (encode_sighash st)
+    sighashSegwit tx st i =
+      sighash_segwit tx i sampleScriptCode sampleValue (encode_sighash st)
